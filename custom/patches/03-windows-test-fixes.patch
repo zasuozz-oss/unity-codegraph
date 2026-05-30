@@ -1,0 +1,76 @@
+diff --git a/__tests__/mcp-initialize.test.ts b/__tests__/mcp-initialize.test.ts
+index 31899aa..1832c68 100644
+--- a/__tests__/mcp-initialize.test.ts
++++ b/__tests__/mcp-initialize.test.ts
+@@ -34,6 +34,21 @@ function spawnServer(cwd: string): ChildProcessWithoutNullStreams {
+   }) as ChildProcessWithoutNullStreams;
+ }
+ 
++async function killChild(child: ChildProcessWithoutNullStreams): Promise<void> {
++  if (child.exitCode !== null || child.signalCode !== null) return;
++
++  await new Promise<void>((resolve) => {
++    const timeout = setTimeout(resolve, 2000);
++    const done = () => {
++      clearTimeout(timeout);
++      resolve();
++    };
++    child.once('exit', done);
++    child.once('error', done);
++    child.kill('SIGKILL');
++  });
++}
++
+ function sendInitialize(child: ChildProcessWithoutNullStreams, projectPath: string) {
+   const msg = JSON.stringify({
+     jsonrpc: '2.0',
+@@ -107,9 +122,9 @@ describe('MCP initialize handshake (issue #172)', () => {
+     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-mcp-init-'));
+   });
+ 
+-  afterEach(() => {
++  afterEach(async () => {
+     if (child && !child.killed) {
+-      child.kill('SIGKILL');
++      await killChild(child);
+       child = null;
+     }
+     fs.rmSync(tempDir, { recursive: true, force: true });
+diff --git a/__tests__/mcp-roots.test.ts b/__tests__/mcp-roots.test.ts
+index 8e1d452..ca09e2d 100644
+--- a/__tests__/mcp-roots.test.ts
++++ b/__tests__/mcp-roots.test.ts
+@@ -32,6 +32,21 @@ function spawnServer(cwd: string): ChildProcessWithoutNullStreams {
+   }) as ChildProcessWithoutNullStreams;
+ }
+ 
++async function killChild(child: ChildProcessWithoutNullStreams): Promise<void> {
++  if (child.exitCode !== null || child.signalCode !== null) return;
++
++  await new Promise<void>((resolve) => {
++    const timeout = setTimeout(resolve, 2000);
++    const done = () => {
++      clearTimeout(timeout);
++      resolve();
++    };
++    child.once('exit', done);
++    child.once('error', done);
++    child.kill('SIGKILL');
++  });
++}
++
+ /** Parse every JSON-RPC message the server writes to stdout into an array. */
+ function collectMessages(child: ChildProcessWithoutNullStreams): Array<Record<string, any>> {
+   const messages: Array<Record<string, any>> = [];
+@@ -84,9 +99,9 @@ describe('MCP project resolution via roots/list (issue #196)', () => {
+     projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-mcp-proj-'));
+   });
+ 
+-  afterEach(() => {
++  afterEach(async () => {
+     if (child && !child.killed) {
+-      child.kill('SIGKILL');
++      await killChild(child);
+       child = null;
+     }
+     fs.rmSync(cwdDir, { recursive: true, force: true });

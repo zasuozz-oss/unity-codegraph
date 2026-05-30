@@ -1,0 +1,364 @@
+diff --git a/package.json b/package.json
+index 913433f..18e8633 100644
+--- a/package.json
++++ b/package.json
+@@ -42,7 +42,8 @@
+     "picomatch": "^4.0.3",
+     "sisteransi": "^1.0.5",
+     "tree-sitter-wasms": "^0.1.11",
+-    "web-tree-sitter": "^0.25.3"
++    "web-tree-sitter": "^0.25.3",
++    "yaml": "^2.9.0"
+   },
+   "devDependencies": {
+     "@types/better-sqlite3": "^7.6.0",
+diff --git a/src/bin/codegraph.ts b/src/bin/codegraph.ts
+index 9e7f988..a94ed1b 100644
+--- a/src/bin/codegraph.ts
++++ b/src/bin/codegraph.ts
+@@ -32,6 +32,7 @@ import { getGlyphs } from '../ui/glyphs';
+ 
+ import { buildNode25BlockBanner, buildNodeTooOldBanner, MIN_NODE_MAJOR } from './node-version-check';
+ import { relaunchWithWasmRuntimeFlagsIfNeeded } from '../extraction/wasm-runtime-flags';
++import { enableUnityMode, writeUnityMarker } from '../extraction/unity-mode';
+ 
+ // Lazy-load heavy modules (CodeGraph, runInstaller) to keep CLI startup fast.
+ async function loadCodeGraph(): Promise<typeof import('../index')> {
+@@ -429,6 +430,11 @@ program
+       if (isInitialized(projectPath)) {
+         clack.log.warn(`Already initialized in ${projectPath}`);
+         clack.log.info('Use "codegraph index" to re-index or "codegraph sync" to update');
++        // Keep the dashboard registry in sync even on a re-init no-op.
++        try {
++          const { upsertProject } = await import('../registry/project-registry');
++          upsertProject(projectPath);
++        } catch { /* non-fatal */ }
+         try {
+           const { offerWatchFallback } = await import('../installer');
+           await offerWatchFallback(clack, projectPath);
+@@ -460,6 +466,23 @@ program
+       }
+       printIndexResult(clack, result, projectPath);
+ 
++      // Register this project in the global dashboard registry.
++      try {
++        const { upsertProject } = await import('../registry/project-registry');
++        upsertProject(projectPath);
++      } catch { /* non-fatal */ }
++
++      // Write per-project agent rule files (AGENTS.md / CLAUDE.md).
++      try {
++        const { writeAgentRules } = await import('../registry/agent-rules');
++        writeAgentRules(projectPath, {
++          name: path.basename(projectPath),
++          files: result.filesIndexed,
++          nodes: result.nodesCreated,
++          edges: result.edgesCreated,
++        });
++      } catch { /* non-fatal */ }
++
+       try {
+         const { offerWatchFallback } = await import('../installer');
+         await offerWatchFallback(clack, projectPath);
+@@ -511,6 +534,18 @@ program
+       const cg = CodeGraph.openSync(projectPath);
+       cg.uninitialize();
+ 
++      // Drop it from the global dashboard registry.
++      try {
++        const { removeProject } = await import('../registry/project-registry');
++        removeProject(projectPath);
++      } catch { /* non-fatal */ }
++
++      // Strip the per-project agent rule block we wrote on init.
++      try {
++        const { removeAgentRules } = await import('../registry/agent-rules');
++        removeAgentRules(projectPath);
++      } catch { /* non-fatal */ }
++
+       // Clean up any git sync hooks we installed (no-op if none / not a repo).
+       try {
+         const { removeGitSyncHook } = await import('../sync/git-hooks');
+@@ -1700,6 +1735,50 @@ program
+     }
+   });
+ 
++/**
++ * codegraph unity <command> [args…]
++ *
++ * Thin Unity-mode wrapper. It does NOT reimplement any command — it enables
++ * Unity extraction for this process (`.prefab`/`.unity`/`.asset`/`.meta`/`.asmdef`
++ * + Unity ignore dirs) and then re-dispatches into the EXACT upstream command you
++ * named, forwarding every argument and flag verbatim. So `codegraph unity init -i`,
++ * `codegraph unity sync -q`, `codegraph unity index -v`, etc. behave identically to
++ * their plain counterparts (including any future upstream flags), only with Unity
++ * assets included. It also drops a `.codegraph/unity` marker so later plain
++ * `codegraph sync` / `serve --mcp` on that project stay Unity-aware. Plain
++ * `codegraph …` is never altered.
++ */
++program
++  .command('unity [command...]')
++  .description('Run any codegraph command with Unity extraction enabled (e.g. "unity init -i")')
++  .allowUnknownOption(true)
++  .allowExcessArguments(true)
++  .helpOption(false)
++  .action(async (commandArgs: string[]) => {
++    enableUnityMode();
++
++    // Everything after the literal `unity` token, verbatim (flags included).
++    const unityIdx = process.argv.indexOf('unity');
++    const forwarded = unityIdx >= 0 ? process.argv.slice(unityIdx + 1) : (commandArgs || []);
++
++    if (forwarded.length === 0) {
++      program.outputHelp();
++      return;
++    }
++
++    // Persist the Unity marker for init/index/sync once the project dir exists.
++    // writeUnityMarker is a no-op if `.codegraph/` isn't there (e.g. failed init).
++    const sub = forwarded[0];
++    if (sub === 'init' || sub === 'index' || sub === 'sync') {
++      const pathArg = forwarded.slice(1).find((a) => !a.startsWith('-'));
++      const projectPath = path.resolve(pathArg || process.cwd());
++      process.once('exit', () => writeUnityMarker(projectPath));
++    }
++
++    // Re-dispatch into the real command tree with Unity mode already on.
++    await program.parseAsync(['node', 'codegraph', ...forwarded]);
++  });
++
+ // Parse and run
+ program.parse();
+ 
+diff --git a/src/extraction/grammars.ts b/src/extraction/grammars.ts
+index c9a2bcb..84d8a78 100644
+--- a/src/extraction/grammars.ts
++++ b/src/extraction/grammars.ts
+@@ -9,8 +9,9 @@
+ import * as path from 'path';
+ import { Parser, Language as WasmLanguage } from 'web-tree-sitter';
+ import { Language } from '../types';
++import { UNITY_ASSET_EXTENSIONS } from './unity-preset';
+ 
+-export type GrammarLanguage = Exclude<Language, 'svelte' | 'vue' | 'liquid' | 'yaml' | 'twig' | 'xml' | 'properties' | 'unknown'>;
++export type GrammarLanguage = Exclude<Language, 'svelte' | 'vue' | 'liquid' | 'yaml' | 'twig' | 'xml' | 'properties' | 'unity_asset' | 'unity_asmdef' | 'unknown'>;
+ 
+ /**
+  * WASM filename map — maps each language to its .wasm grammar file
+@@ -102,8 +103,21 @@ export const EXTENSION_MAP: Record<string, Language> = {
+   // shape as the `.yml` variants — the YAML/properties extractor emits one node
+   // per leaf key, and the Spring resolver links `@Value("${k}")` references.
+   '.properties': 'properties',
++  // Unity asset/serialized files. Listed for completeness only — CodeGraph never
++  // parses them: they are in UNITY_ASSET_EXTENSIONS, which detectLanguage and
++  // isSourceFile short-circuit to skip (C#-only index, gitnexus parity).
++  '.prefab': 'unity_asset',
++  '.unity': 'unity_asset',
++  '.asset': 'unity_asset',
++  '.meta': 'unity_asset',
++  '.asmdef': 'unity_asmdef',
+ };
+ 
++// Unity asset extensions (`UNITY_ASSET_EXTENSIONS`, from unity-preset) appear in
++// EXTENSION_MAP for documentation only — `detectLanguage` and `isSourceFile` skip
++// them unconditionally, so any Unity project indexes pure game C# (gitnexus
++// parity): no prefab/scene/asset/meta nodes, in Unity mode or not.
++
+ /**
+  * Whether a file is one CodeGraph can parse, based purely on its extension.
+  * This is the single source of truth for "should we index this file" — derived
+@@ -113,7 +127,10 @@ export function isSourceFile(filePath: string): boolean {
+   if (isPlayRoutesFile(filePath)) return true; // Play `conf/routes` is extensionless
+   const dot = filePath.lastIndexOf('.');
+   if (dot < 0) return false;
+-  return filePath.slice(dot).toLowerCase() in EXTENSION_MAP;
++  const ext = filePath.slice(dot).toLowerCase();
++  // Unity assets are never indexed — gitnexus parity: the graph is C# only.
++  if (UNITY_ASSET_EXTENSIONS.has(ext)) return false;
++  return ext in EXTENSION_MAP;
+ }
+ 
+ /**
+@@ -236,6 +253,8 @@ export function detectLanguage(filePath: string, source?: string): Language {
+   // Play framework resolver extracts route nodes from it.
+   if (isPlayRoutesFile(filePath)) return 'yaml';
+   const ext = filePath.substring(filePath.lastIndexOf('.')).toLowerCase();
++  // Unity assets resolve to 'unknown' — never parsed (gitnexus parity: C# only).
++  if (UNITY_ASSET_EXTENSIONS.has(ext)) return 'unknown';
+   const lang = EXTENSION_MAP[ext] || 'unknown';
+ 
+   // .h files could be C, C++, or Objective-C — check source content
+@@ -276,6 +295,7 @@ export function isLanguageSupported(language: Language): boolean {
+   if (language === 'twig') return true; // file-level tracking only
+   if (language === 'xml') return true; // MyBatis mapper extractor
+   if (language === 'properties') return true; // Spring config keys
++  if (language === 'unity_asset' || language === 'unity_asmdef') return true; // Unity custom extractor
+   if (language === 'unknown') return false;
+   return language in WASM_GRAMMAR_FILES;
+ }
+@@ -287,6 +307,7 @@ export function isGrammarLoaded(language: Language): boolean {
+   if (language === 'svelte' || language === 'vue' || language === 'liquid') return true;
+   if (language === 'yaml' || language === 'twig') return true; // no WASM grammar needed
+   if (language === 'xml' || language === 'properties') return true; // no WASM grammar needed
++  if (language === 'unity_asset' || language === 'unity_asmdef') return true; // custom extractor
+   return languageCache.has(language);
+ }
+ 
+@@ -382,6 +403,8 @@ export function getLanguageDisplayName(language: Language): string {
+     twig: 'Twig',
+     xml: 'XML',
+     properties: 'Java properties',
++    unity_asset: 'Unity asset',
++    unity_asmdef: 'Unity assembly definition',
+     unknown: 'Unknown',
+   };
+   return names[language] || language;
+diff --git a/src/extraction/index.ts b/src/extraction/index.ts
+index 42037d7..522d4bb 100644
+--- a/src/extraction/index.ts
++++ b/src/extraction/index.ts
+@@ -18,6 +18,8 @@ import {
+ import { QueryBuilder } from '../db/queries';
+ import { extractFromSource } from './tree-sitter';
+ import { detectLanguage, isSourceFile, isLanguageSupported, isFileLevelOnlyLanguage, initGrammars, loadGrammarsForLanguages } from './grammars';
++import { isUnityMode } from './unity-mode';
++import { UNITY_ALL_IGNORE_DIRS } from './unity-preset';
+ import { logDebug, logWarn } from '../errors';
+ import { validatePathWithinRoot, normalizePath } from '../utils';
+ import ignore, { Ignore } from 'ignore';
+@@ -106,14 +108,14 @@ const MAX_FILE_SIZE = 1024 * 1024;
+  * not third-party noise, without requiring a `.gitignore` (issue #407). The
+  * exclusion applies uniformly (git or not, tracked or not); the only opt-in is an
+  * explicit `.gitignore` negation (e.g. `!vendor/`). First-party-prone or generic
+- * names (`packages`, `lib`, `app`, `bin`, `src`, `deps`, `env`, `tmp`, `storage`,
+- * `Library`) are deliberately NOT listed, to avoid ever hiding real source.
++ * names (`packages`, `lib`, `app`, `bin`, `src`, `deps`, `env`, `tmp`, `storage`)
++ * are deliberately NOT listed, to avoid ever hiding real source.
+  *
+  * Only dirs that actually contain *indexable source* (or are enormous) earn a slot
+  * — IDE/state dirs like `.idea`/`.vs` are omitted because CodeGraph indexes only
+  * recognized source extensions, so they produce no symbols regardless.
+  */
+-const DEFAULT_IGNORE_DIRS: ReadonlySet<string> = new Set([
++export const DEFAULT_IGNORE_DIRS: ReadonlySet<string> = new Set([
+   // JS / TS — dependency directories
+   'node_modules', 'bower_components', 'jspm_packages', 'web_modules',
+   '.yarn', '.pnpm-store',
+@@ -151,6 +153,10 @@ const DEFAULT_IGNORE_DIRS: ReadonlySet<string> = new Set([
+   '.cache',
+ ]);
+ 
++// Unity engine/SDK dirs to skip live in `unity-preset.ts` (`UNITY_ALL_IGNORE_DIRS`)
++// and are applied ONLY in Unity mode, so a plain `codegraph init` never hides a
++// directory that happens to share these names.
++
+ /** Gitignore-style patterns for the `ignore` matcher: the dirs above plus a few globs. */
+ const DEFAULT_IGNORE_PATTERNS: string[] = [
+   ...Array.from(DEFAULT_IGNORE_DIRS, (d) => `${d}/`),
+@@ -168,6 +174,8 @@ const DEFAULT_IGNORE_PATTERNS: string[] = [
+  */
+ export function buildDefaultIgnore(rootDir: string): Ignore {
+   const ig = ignore().add(DEFAULT_IGNORE_PATTERNS);
++  // Unity-only ignore dirs are added at runtime so they apply solely in Unity mode.
++  if (isUnityMode()) ig.add(UNITY_ALL_IGNORE_DIRS.map((d) => `${d}/`));
+   try {
+     const rootGitignore = path.join(rootDir, '.gitignore');
+     if (fs.existsSync(rootGitignore)) ig.add(fs.readFileSync(rootGitignore, 'utf-8'));
+diff --git a/src/extraction/tree-sitter.ts b/src/extraction/tree-sitter.ts
+index f576839..b180545 100644
+--- a/src/extraction/tree-sitter.ts
++++ b/src/extraction/tree-sitter.ts
+@@ -1883,18 +1883,42 @@ export class TreeSitterExtractor {
+    * (most non-decorator-using languages), the function is a no-op.
+    */
+   private extractDecoratorsFor(declNode: SyntaxNode, decoratedId: string): void {
++    const isDecoratorNode = (n: SyntaxNode): boolean =>
++      n.type === 'decorator' ||
++      n.type === 'annotation' ||
++      n.type === 'marker_annotation' ||
++      n.type === 'attribute' ||
++      n.type === 'attribute_list';
++
+     const consider = (n: SyntaxNode | null): void => {
+       if (!n) return;
+       // `marker_annotation` is Java's grammar for arg-less annotations
+       // (`@Override`, `@Deprecated`); without including it, every
+-      // such Java annotation would be silently skipped.
+-      if (
+-        n.type !== 'decorator' &&
+-        n.type !== 'annotation' &&
+-        n.type !== 'marker_annotation'
+-      ) {
++      // such Java annotation would be silently skipped. C# uses
++      // `attribute_list`/`attribute` for `[Attr]` syntax.
++      if (!isDecoratorNode(n)) {
++        return;
++      }
++      if (n.type === 'attribute_list') {
++        for (let i = 0; i < n.namedChildCount; i++) {
++          consider(n.namedChild(i));
++        }
+         return;
+       }
++
++      const text = getNodeText(n, this.source);
++      const typeofRegex = /\btypeof\s*\(\s*([A-Za-z_][\w.]*)\s*\)/g;
++      let typeofMatch: RegExpExecArray | null;
++      while ((typeofMatch = typeofRegex.exec(text)) !== null) {
++        this.unresolvedReferences.push({
++          fromNodeId: decoratedId,
++          referenceName: typeofMatch[1]!,
++          referenceKind: 'references',
++          line: n.startPosition.row + 1,
++          column: n.startPosition.column,
++        });
++      }
++
+       // Find the leading identifier: skip the `@` punct, unwrap
+       // a call_expression if the decorator is invoked with args.
+       let target: SyntaxNode | null = null;
+@@ -1963,7 +1987,7 @@ export class TreeSitterExtractor {
+         for (let j = declIdx - 1; j >= 0; j--) {
+           const sibling = parent.namedChild(j);
+           if (!sibling) continue;
+-          if (sibling.type !== 'decorator' && sibling.type !== 'annotation' && sibling.type !== 'marker_annotation') {
++          if (!isDecoratorNode(sibling)) {
+             break; // non-decorator separator → stop consuming
+           }
+           consider(sibling);
+diff --git a/src/index.ts b/src/index.ts
+index ee3bf51..a2fcdd9 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -38,6 +38,7 @@ import {
+   extractFromSource,
+   initGrammars,
+ } from './extraction';
++import { enableUnityModeIfMarked } from './extraction/unity-mode';
+ import {
+   ReferenceResolver,
+   createResolver,
+@@ -233,6 +234,10 @@ export class CodeGraph {
+     await initGrammars();
+     const resolvedRoot = path.resolve(projectRoot);
+ 
++    // A project initialized via `codegraph unity init` carries a marker; honor it
++    // so sync/serve/index stay Unity-aware without re-passing the subcommand.
++    enableUnityModeIfMarked(resolvedRoot);
++
+     // Check if initialized
+     if (!isInitialized(resolvedRoot)) {
+       throw new Error(`CodeGraph not initialized in ${resolvedRoot}. Run init() first.`);
+diff --git a/src/types.ts b/src/types.ts
+index 0cfaf0b..a0a1306 100644
+--- a/src/types.ts
++++ b/src/types.ts
+@@ -92,6 +92,8 @@ export const LANGUAGES = [
+   'twig',
+   'xml',
+   'properties',
++  'unity_asset',
++  'unity_asmdef',
+   'unknown',
+ ] as const;
+ 
