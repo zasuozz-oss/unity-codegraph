@@ -196,8 +196,20 @@ install_skills() {
       warn "  Reclaim once:  sudo chown -R $(id -u):$(id -g) \"$target\""
       continue
     fi
-    local n=0 f name
+    local n=0 d name f
+    # Support folder-based skills (each containing SKILL.md)
+    for d in "$CUSTOM_SKILLS_DIR"/*/; do
+      [ -d "$d" ] || continue
+      name="$(basename "$d")"
+      if [ -f "$d/SKILL.md" ]; then
+        if mkdir -p "$target/$name" 2>/dev/null && cp "$d/SKILL.md" "$target/$name/SKILL.md" 2>/dev/null; then
+          n=$((n + 1))
+        fi
+      fi
+    done
+    # Support legacy file-based skills (*.md directly in CUSTOM_SKILLS_DIR)
     for f in "$CUSTOM_SKILLS_DIR"/*.md; do
+      [ -f "$f" ] || continue
       name="$(basename "$f" .md)"
       [ "$name" = "README" ] && continue
       if mkdir -p "$target/$name" 2>/dev/null && cp "$f" "$target/$name/SKILL.md" 2>/dev/null; then

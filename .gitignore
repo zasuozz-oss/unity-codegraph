@@ -1,26 +1,84 @@
+# ==============================================================================
 # Upstream codegraph clone — created/managed by setup.sh, never tracked here.
+# ==============================================================================
 /codegraph/
+codegraph/
 
 # Fallback npm cache used by setup.sh when the default (~/.npm) is poisoned
 /.npm-cache/
 
-# Node / build (covers web/node_modules, web/dist at any depth)
+# ==============================================================================
+# Node / build / Caches (covers web/node_modules, web/dist at any depth)
+# ==============================================================================
 node_modules/
 dist/
+build/
+out/
+.npm/
+.cache/
 *.tsbuildinfo
+.eslintcache
+.prettiercache
+
+# ==============================================================================
+# Data, Databases, Runtime State & Indexes
+# ==============================================================================
+data/
+/data/
+state_store.db/
+stream_store/
+db/
+database/
+*.db
+*.sqlite
+*.sqlite3
+*.sql
+*.bin
+
+# ==============================================================================
+# Environment Variables & Secrets (CRITICAL for preventing data leakage)
+# ==============================================================================
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.env.*
+*.env
+secrets.json
+*.key
+*.pem
+*.cert
+*.pfx
+*.p12
+
+# ==============================================================================
+# Logs
+# ==============================================================================
 *.log
 npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
 
-# OS / IDE
+# ==============================================================================
+# OS & Editor Specific Files
+# ==============================================================================
 .DS_Store
 Thumbs.db
+ehthumbs.db
+Desktop.ini
 .idea/
 .vscode/
 *.swp
+*.swo
+*~
+*.bak
+*.tmp
 
-# CodeGraph per-project index
+# ==============================================================================
+# CodeGraph per-project index & Agent Cache
+# ==============================================================================
 .codegraph/
-
-# Parallels Windows VM SSH/connection config (local machine)
+.claude/
 .parallels
-.claude
