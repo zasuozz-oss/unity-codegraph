@@ -1,6 +1,9 @@
 # Upstream codegraph clone — created/managed by setup.sh, never tracked here.
 /codegraph/
 
+# Fallback npm cache used by setup.sh when the default (~/.npm) is poisoned
+/.npm-cache/
+
 # Node / build (covers web/node_modules, web/dist at any depth)
 node_modules/
 dist/

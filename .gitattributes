@@ -1,0 +1,9 @@
+# Shell scripts must stay LF and executable so they run on macOS/Linux even when
+# the repo is checked out on Windows. Git Bash / WSL read LF fine, and Windows
+# ignores the POSIX exec bit — so this is safe for the Windows workflow too.
+*.sh text eol=lf
+
+# Windows-native scripts keep CRLF.
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf

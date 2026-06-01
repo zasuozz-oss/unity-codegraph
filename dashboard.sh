@@ -52,6 +52,14 @@ fi
 step "Dependencies"
 if [ ! -d "$WEB_DIR/node_modules" ]; then
   info "Installing web deps (first run)…"
+  # A past `sudo` run can leave root-owned files in the default npm cache (~/.npm),
+  # which breaks `npm install` with EACCES. Route npm at a user-owned cache instead
+  # (no sudo needed) — same workaround as setup.sh. Skipped when the cache is clean.
+  if find "$(npm config get cache 2>/dev/null)" ! -user "$(id -un)" -print -quit 2>/dev/null | grep -q .; then
+    export npm_config_cache="$SCRIPT_DIR/.npm-cache"
+    mkdir -p "$npm_config_cache"
+    warn "Default npm cache has root-owned files; using $npm_config_cache"
+  fi
   ( cd "$WEB_DIR" && npm install --no-fund --no-audit )
   ok "Installed"
 else

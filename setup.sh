@@ -40,6 +40,30 @@ CLAUDE_SKILLS_DIR="$HOME/.claude/skills"
 GEMINI_SKILLS_DIR="$HOME/.gemini/config/skills"
 CODEX_SKILLS_DIR="${CODEX_HOME:-$HOME/.codex}/skills"
 
+# ── No-sudo guards / self-heal helpers ───────────────────────
+# This script must run as your normal user. Running it with sudo makes the clone
+# and the npm global package root-owned, which breaks every later (non-sudo) run.
+# guard_no_root prevents that; path_has_foreign_files detects an already-poisoned
+# tree from a past sudo run so we can fail with clear guidance instead of cryptically.
+
+guard_no_root() {
+  if [ "$(id -u)" = "0" ]; then
+    err "Do NOT run this script with sudo / as root."
+    err "It writes to your user dirs (~/.claude, ~/.codex, npm global) and clones a repo;"
+    err "running as root makes those files root-owned and breaks future runs."
+    err "Re-run as your normal user:  ./setup.sh"
+    exit 1
+  fi
+}
+
+# True if any entry under $1 is NOT owned by the current user (e.g. left behind
+# by an accidental `sudo ./setup.sh`). Root-owned dirs are world-readable, so
+# `find` can still traverse them as us.
+path_has_foreign_files() {
+  [ -e "$1" ] || return 1
+  [ -n "$(find "$1" ! -user "$(id -un)" -print -quit 2>/dev/null)" ]
+}
+
 # ── Prerequisites ────────────────────────────────────────────
 check_prereqs() {
   step "Checking prerequisites"
@@ -56,6 +80,17 @@ check_prereqs() {
 # ── Clone / fork upstream into ./codegraph ───────────────────
 fetch_upstream() {
   step "Fetching upstream codegraph"
+  # A previous accidental `sudo ./setup.sh` can leave a root-owned clone we can't
+  # build into or patch. On macOS only root can delete a root-owned directory, so
+  # we can't auto-fix it — but we refuse to limp on with a cryptic failure later.
+  # Clear it ONCE with the command below; guard_no_root keeps it from recurring.
+  if path_has_foreign_files "$UPSTREAM_DIR"; then
+    err "Clone at $UPSTREAM_DIR has files not owned by $(id -un) — leftover from an"
+    err "earlier 'sudo ./setup.sh'. The OS requires root to remove root-owned files."
+    err "Run this ONCE, then re-run ./setup.sh (no sudo needed ever after):"
+    err "    sudo rm -rf \"$UPSTREAM_DIR\""
+    exit 1
+  fi
   if [ -d "$UPSTREAM_DIR/.git" ]; then
     ok "Already cloned at $UPSTREAM_DIR (run ./update.sh to pull)"
     return
@@ -84,21 +119,57 @@ apply_overlay() {
 }
 
 # ── Build + globally link the CLI ────────────────────────────
+# True iff the `codegraph` on PATH is THIS Unity-enabled build (has `unity` cmd).
+codegraph_has_unity() {
+  command -v codegraph >/dev/null 2>&1 \
+    && codegraph --help 2>/dev/null | grep -q "unity \[command"
+}
+
 build_cli() {
   step "Building & linking codegraph CLI"
+
+  # A past `sudo` run can leave root-owned files in the default npm cache (~/.npm),
+  # making `npm install` fail with EACCES. We can't chown them without sudo, so for
+  # this run route npm at a fresh user-owned cache (repo-local, gitignored) instead.
+  if path_has_foreign_files "$(npm config get cache 2>/dev/null)"; then
+    export npm_config_cache="$SCRIPT_DIR/.npm-cache"
+    mkdir -p "$npm_config_cache"
+    warn "Default npm cache has root-owned files (prior sudo run); using $npm_config_cache"
+  fi
+
   ( cd "$UPSTREAM_DIR" && npm install && npm run build )
   [ -f "$CLI" ] || { err "Build produced no $CLI"; exit 1; }
+  chmod +x "$CLI" 2>/dev/null || true
+
   # A previously published global install of @colbymchenry/codegraph (the npm
-  # thin-installer) owns the `codegraph` bin and shadows our local link — drop it
-  # first so `npm link` below actually wins.
+  # thin-installer) owns the `codegraph` bin and shadows our local link. We don't
+  # need to remove it: the verified fallback below overwrites the bin SYMLINK
+  # (which lives in a user-owned dir, so no sudo needed) to point at this build.
   npm rm -g @colbymchenry/codegraph >/dev/null 2>&1 || true
-  if ( cd "$UPSTREAM_DIR" && npm link >/dev/null 2>&1 ); then
-    command -v codegraph >/dev/null 2>&1 \
-      && ok "Built & linked — 'codegraph' is on PATH ($(command -v codegraph))" \
-      || warn "Linked, but 'codegraph' not on PATH — add your npm global bin ($(npm prefix -g 2>/dev/null)) to PATH"
-  else
-    warn "npm link failed — use 'node $CLI' directly"
+  ( cd "$UPSTREAM_DIR" && npm link >/dev/null 2>&1 ) || true
+  hash -r 2>/dev/null || true
+
+  if codegraph_has_unity; then
+    ok "Built & linked — Unity-enabled 'codegraph' is on PATH ($(command -v codegraph))"
+    return
   fi
+
+  # npm link didn't win (commonly a root-owned stale install shadows it). Fall
+  # back to a direct symlink — we own the global bin dir even if the stale pkg is
+  # root-owned, so removing the symlink there and recreating it works without sudo.
+  local gbin; gbin="$(npm prefix -g 2>/dev/null)/bin"
+  if [ -d "$gbin" ] && [ -w "$gbin" ]; then
+    rm -f "$gbin/codegraph"
+    ln -s "$CLI" "$gbin/codegraph"
+    hash -r 2>/dev/null || true
+    if codegraph_has_unity; then
+      ok "Linked via direct symlink → $gbin/codegraph (a stale global install was shadowing the build)"
+      return
+    fi
+  fi
+
+  warn "Could not put a Unity-enabled 'codegraph' on PATH (npm global bin not writable?)."
+  warn "Run the CLI directly meanwhile:  node $CLI unity init"
 }
 
 # ── Wire MCP into agents (upstream's own installer) ──────────
@@ -117,13 +188,21 @@ install_skills() {
   [ -d "$CUSTOM_SKILLS_DIR" ] || { warn "No custom/skills dir"; return; }
   local target
   for target in "$CLAUDE_SKILLS_DIR" "$GEMINI_SKILLS_DIR" "$CODEX_SKILLS_DIR"; do
+    mkdir -p "$target" 2>/dev/null || true
+    # A prior `sudo` run can leave an agent's skills dir root-owned; skip it with
+    # guidance rather than aborting the whole setup (the OS needs root to reclaim).
+    if [ ! -w "$target" ]; then
+      warn "Skipping $target — not writable (root-owned from a prior sudo run)."
+      warn "  Reclaim once:  sudo chown -R $(id -u):$(id -g) \"$target\""
+      continue
+    fi
     local n=0 f name
     for f in "$CUSTOM_SKILLS_DIR"/*.md; do
       name="$(basename "$f" .md)"
       [ "$name" = "README" ] && continue
-      mkdir -p "$target/$name"
-      cp "$f" "$target/$name/SKILL.md"
-      n=$((n + 1))
+      if mkdir -p "$target/$name" 2>/dev/null && cp "$f" "$target/$name/SKILL.md" 2>/dev/null; then
+        n=$((n + 1))
+      fi
     done
     ok "$n skill(s) → $target"
   done
@@ -144,6 +223,7 @@ init_registry() {
 
 main() {
   echo -e "\n${CYAN}🔧 unity-codegraph setup${NC}"
+  guard_no_root
   check_prereqs
   fetch_upstream
   apply_overlay
