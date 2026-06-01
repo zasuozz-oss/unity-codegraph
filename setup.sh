@@ -125,6 +125,33 @@ codegraph_has_unity() {
     && codegraph --help 2>/dev/null | grep -q "unity \[command"
 }
 
+# Put a Unity-enabled `codegraph` on PATH (idempotent). Tries `npm link`, then a
+# direct symlink fallback. Safe to call repeatedly — used by build_cli AND as a
+# self-heal guard after `codegraph install` (whose global-install step can
+# clobber our link with the published, non-Unity npm package).
+link_unity_cli() {
+  # A previously published global install of @colbymchenry/codegraph (the npm
+  # thin-installer) owns the `codegraph` bin and shadows our local link. We don't
+  # need to remove it: the verified fallback below overwrites the bin SYMLINK
+  # (which lives in a user-owned dir, so no sudo needed) to point at this build.
+  npm rm -g @colbymchenry/codegraph >/dev/null 2>&1 || true
+  ( cd "$UPSTREAM_DIR" && npm link >/dev/null 2>&1 ) || true
+  hash -r 2>/dev/null || true
+  codegraph_has_unity && return 0
+
+  # npm link didn't win (commonly a root-owned stale install shadows it). Fall
+  # back to a direct symlink — we own the global bin dir even if the stale pkg is
+  # root-owned, so removing the symlink there and recreating it works without sudo.
+  local gbin; gbin="$(npm prefix -g 2>/dev/null)/bin"
+  if [ -d "$gbin" ] && [ -w "$gbin" ]; then
+    rm -f "$gbin/codegraph"
+    ln -s "$CLI" "$gbin/codegraph"
+    hash -r 2>/dev/null || true
+    codegraph_has_unity && return 0
+  fi
+  return 1
+}
+
 build_cli() {
   step "Building & linking codegraph CLI"
 
@@ -141,31 +168,9 @@ build_cli() {
   [ -f "$CLI" ] || { err "Build produced no $CLI"; exit 1; }
   chmod +x "$CLI" 2>/dev/null || true
 
-  # A previously published global install of @colbymchenry/codegraph (the npm
-  # thin-installer) owns the `codegraph` bin and shadows our local link. We don't
-  # need to remove it: the verified fallback below overwrites the bin SYMLINK
-  # (which lives in a user-owned dir, so no sudo needed) to point at this build.
-  npm rm -g @colbymchenry/codegraph >/dev/null 2>&1 || true
-  ( cd "$UPSTREAM_DIR" && npm link >/dev/null 2>&1 ) || true
-  hash -r 2>/dev/null || true
-
-  if codegraph_has_unity; then
+  if link_unity_cli; then
     ok "Built & linked — Unity-enabled 'codegraph' is on PATH ($(command -v codegraph))"
     return
-  fi
-
-  # npm link didn't win (commonly a root-owned stale install shadows it). Fall
-  # back to a direct symlink — we own the global bin dir even if the stale pkg is
-  # root-owned, so removing the symlink there and recreating it works without sudo.
-  local gbin; gbin="$(npm prefix -g 2>/dev/null)/bin"
-  if [ -d "$gbin" ] && [ -w "$gbin" ]; then
-    rm -f "$gbin/codegraph"
-    ln -s "$CLI" "$gbin/codegraph"
-    hash -r 2>/dev/null || true
-    if codegraph_has_unity; then
-      ok "Linked via direct symlink → $gbin/codegraph (a stale global install was shadowing the build)"
-      return
-    fi
   fi
 
   warn "Could not put a Unity-enabled 'codegraph' on PATH (npm global bin not writable?)."
@@ -175,10 +180,23 @@ build_cli() {
 # ── Wire MCP into agents (upstream's own installer) ──────────
 configure_mcp() {
   step "Configuring agent MCP (codegraph install)"
-  if node "$CLI" install; then
+  # IMPORTANT: pass --yes. Without it, the installer's "Install the codegraph CLI
+  # on your PATH?" step runs `npm install -g @colbymchenry/codegraph`, which
+  # REPLACES our Unity-enabled symlink with the published (non-Unity) package —
+  # that's the recurring `codegraph unity init → unknown command 'unity'` bug.
+  # --yes assumes the CLI is already present (it is — build_cli linked it) and
+  # skips that global install entirely.
+  if node "$CLI" install --yes; then
     ok "MCP configured. NOTE: it points at this local build (Unity-enabled)."
   else
     warn "codegraph install failed — configure MCP manually to: node $CLI serve --mcp"
+  fi
+
+  # Belt-and-suspenders: re-verify and re-link if anything clobbered the symlink.
+  if ! codegraph_has_unity; then
+    warn "codegraph on PATH lost its Unity command after install — re-linking."
+    link_unity_cli && ok "Re-linked Unity-enabled 'codegraph' ($(command -v codegraph))" \
+      || warn "Re-link failed. Run directly:  node $CLI unity init"
   fi
 }
 

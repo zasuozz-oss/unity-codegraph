@@ -1,0 +1,43 @@
+diff --git a/src/installer/index.ts b/src/installer/index.ts
+index edd48ec..f4700cf 100644
+--- a/src/installer/index.ts
++++ b/src/installer/index.ts
+@@ -105,8 +105,13 @@ export async function runInstallerWithOptions(opts: RunInstallerOptions): Promis
+   // Step 2: install the codegraph npm package on PATH (always offered;
+   // matches existing behavior). Skipped when --yes (assume present).
+   if (!useDefaults) {
++    const isUnityCustom = fs.existsSync(path.join(__dirname, '..', '..', '..', 'setup.sh'));
++    const confirmMessage = isUnityCustom
++      ? 'Link this Unity-enabled CodeGraph CLI to your PATH? (Recommended to preserve Unity support)'
++      : 'Install the codegraph CLI on your PATH? (Required so agents can launch the MCP server)';
++
+     const shouldInstallGlobally = await clack.confirm({
+-      message: 'Install the codegraph CLI on your PATH? (Required so agents can launch the MCP server)',
++      message: confirmMessage,
+       initialValue: true,
+     });
+     if (clack.isCancel(shouldInstallGlobally)) {
+@@ -115,13 +120,19 @@ export async function runInstallerWithOptions(opts: RunInstallerOptions): Promis
+     }
+     if (shouldInstallGlobally) {
+       const s = clack.spinner();
+-      s.start('Installing codegraph CLI...');
++      s.start(isUnityCustom ? 'Linking custom CodeGraph CLI...' : 'Installing codegraph CLI...');
+       try {
+-        execSync('npm install -g @colbymchenry/codegraph', { stdio: 'pipe', windowsHide: true });
+-        s.stop('Installed codegraph CLI on PATH');
++        if (isUnityCustom) {
++          const rootDir = path.resolve(path.join(__dirname, '..', '..'));
++          execSync('npm link', { cwd: rootDir, stdio: 'pipe', windowsHide: true });
++          s.stop('Linked custom CodeGraph CLI on PATH');
++        } else {
++          execSync('npm install -g @colbymchenry/codegraph', { stdio: 'pipe', windowsHide: true });
++          s.stop('Installed codegraph CLI on PATH');
++        }
+       } catch {
+         s.stop('Could not install (permission denied)');
+-        clack.log.warn('Try: sudo npm install -g @colbymchenry/codegraph');
++        clack.log.warn(isUnityCustom ? 'Try running setup.sh directly' : 'Try: sudo npm install -g @colbymchenry/codegraph');
+       }
+     } else {
+       clack.log.info('Skipped CLI install — agents will not be able to launch the MCP server without it');
