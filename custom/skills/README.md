@@ -1,11 +1,32 @@
 # CodeGraph Unity Agent Skills
 
-Các file trong thư mục này là overlay kỹ năng cho agent khi dùng CodeGraph trên dự án Unity.
+Thư mục này chứa các kỹ năng (skills) cho agent khi sử dụng CodeGraph trên dự án Unity, được định dạng theo cấu trúc chuẩn của agent skill (mỗi skill nằm trong một thư mục riêng và có file `SKILL.md`).
 
-Triển khai thủ công bằng cách copy các file `.md` vào thư mục skill của agent đang dùng:
+## Cấu trúc thư mục
 
-- Gemini / Antigravity: `~/.gemini/config/skills/`
-- Claude Code: `~/.claude/skills/`
-- Codex: `~/.codex/skills/`
+```text
+skills/
+  codegraph-unity-exploring/
+    SKILL.md
+  codegraph-unity-guide/
+    SKILL.md
+  codegraph-unity-impact/
+    SKILL.md
+  codegraph-unity-refactoring/
+    SKILL.md
+```
 
-Installer có thể tự động hóa bước này trong follow-up, nhưng hiện tại các skill được giữ độc lập để không làm đổi workflow upstream.
+## Triển khai thủ công
+
+Copy thư mục của từng skill vào thư mục lưu trữ kỹ năng của agent bạn đang sử dụng:
+
+- **Gemini / Antigravity**: `~/.gemini/config/skills/`
+- **Claude Code**: `~/.claude/skills/`
+- **Codex**: `~/.codex/skills/`
+
+Ví dụ đối với Antigravity:
+```bash
+cp -r custom/skills/codegraph-unity-* ~/.gemini/config/skills/
+```
+
+Installer có thể tự động hóa bước này trong tương lai, hiện tại các skill được giữ độc lập và chuẩn hóa để đảm bảo khả năng tương thích cao nhất.
