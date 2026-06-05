@@ -1,0 +1,63 @@
+diff --git a/src/extraction/index.ts b/src/extraction/index.ts
+index 0f060e7..761af75 100644
+--- a/src/extraction/index.ts
++++ b/src/extraction/index.ts
+@@ -605,9 +605,10 @@ export class ExtractionOrchestrator {
+   }
+ 
+   private resolveUnityAssetEdges(): number {
+-    if (!isUnityAssetMode() || this.unityRawEdges.length === 0) return 0;
++    if (!isUnityAssetMode()) return 0;
+ 
+     this.queries.buildUnityGuidIndex(this.rootDir);
++    if (this.unityRawEdges.length === 0) return 0;
+ 
+     const guidToNodeId = new Map<string, string>();
+     const methodTargetsByGuid = new Map<string, Map<string, string>>();
+@@ -631,6 +632,7 @@ export class ExtractionOrchestrator {
+         row.assetType === 'prefab' ? 'unity_prefab' :
+         row.assetType === 'scene' ? 'unity_scene' :
+         row.assetType === 'asset' ? 'unity_asset' :
++        row.assetType === 'asmdef' ? 'module' :
+         null;
+       if (!expectedKind) continue;
+ 
+@@ -1421,6 +1423,7 @@ export class ExtractionOrchestrator {
+     let filesRemoved = 0;
+     let nodesUpdated = 0;
+     const changedFilePaths: string[] = [];
++    this.unityRawEdges = [];
+ 
+     onProgress?.({
+       phase: 'scanning',
+@@ -1526,6 +1529,8 @@ export class ExtractionOrchestrator {
+       nodesUpdated += result.nodes.length;
+     }
+ 
++    this.resolveUnityAssetEdges();
++
+     return {
+       filesChecked,
+       filesAdded,
+diff --git a/src/extraction/tree-sitter.ts b/src/extraction/tree-sitter.ts
+index cdc4954..88b59df 100644
+--- a/src/extraction/tree-sitter.ts
++++ b/src/extraction/tree-sitter.ts
+@@ -25,6 +25,7 @@ import { DfmExtractor } from './dfm-extractor';
+ import { VueExtractor } from './vue-extractor';
+ import { MyBatisExtractor } from './mybatis-extractor';
+ import { UnityAssetExtractor } from './unity/unity-asset-extractor';
++import { UnityAsmdefExtractor } from './unity/unity-asmdef-extractor';
+ import {
+   getAllFrameworkResolvers,
+   getApplicableFrameworks,
+@@ -3128,6 +3129,9 @@ export function extractFromSource(
+   } else if (detectedLanguage === 'unity_asset') {
+     const extractor = new UnityAssetExtractor(filePath, source);
+     result = extractor.extract();
++  } else if (detectedLanguage === 'unity_asmdef') {
++    const extractor = new UnityAsmdefExtractor(filePath, source);
++    result = extractor.extract();
+   } else if (isFileLevelOnlyLanguage(detectedLanguage)) {
+     // No symbol extraction at this stage — files are tracked at the file-record
+     // level only. Framework extractors (Drupal routing yml, Spring `@Value`

@@ -1,0 +1,234 @@
+diff --git a/src/db/queries.ts b/src/db/queries.ts
+index a0ac31e..c4d47df 100644
+--- a/src/db/queries.ts
++++ b/src/db/queries.ts
+@@ -21,6 +21,7 @@ import { safeJsonParse } from '../utils';
+ import { kindBonus, nameMatchBonus, scorePathRelevance } from '../search/query-utils';
+ import { parseQuery, boundedEditDistance } from '../search/query-parser';
+ import { isGeneratedFile } from '../extraction/generated-detection';
++import { buildGuidIndex, UnityAssetType } from '../extraction/unity/unity-guid-index';
+ 
+ /**
+  * Path-only heuristic for files that should not be candidates for
+@@ -109,6 +110,13 @@ interface UnresolvedRefRow {
+   language: string;
+ }
+ 
++export interface UnityGuidDbRow {
++  guid: string;
++  assetPath: string;
++  assetType: UnityAssetType;
++  mainFileId: number | null;
++}
++
+ /**
+  * Convert database row to Node object
+  */
+@@ -689,6 +697,36 @@ export class QueryBuilder {
+     return rows.map(rowToNode);
+   }
+ 
++  buildUnityGuidIndex(rootDir: string): number {
++    return buildGuidIndex(rootDir, this.db);
++  }
++
++  getUnityGuidRows(): UnityGuidDbRow[] {
++    const rows = this.db.prepare(`
++      SELECT guid, asset_path, asset_type, main_file_id
++      FROM unity_guids
++    `).all() as Array<{
++      guid: string;
++      asset_path: string;
++      asset_type: string;
++      main_file_id: number | null;
++    }>;
++    return rows.map((row) => ({
++      guid: row.guid,
++      assetPath: row.asset_path,
++      assetType: row.asset_type as UnityAssetType,
++      mainFileId: row.main_file_id,
++    }));
++  }
++
++  getUnityAnchorNodes(): Node[] {
++    const rows = this.db.prepare(`
++      SELECT * FROM nodes
++      WHERE kind IN ('unity_prefab', 'unity_scene', 'unity_asset', 'unity_gameobject', 'unity_component')
++    `).all() as NodeRow[];
++    return rows.map(rowToNode);
++  }
++
+   /**
+    * Get nodes by exact name match (uses idx_nodes_name index)
+    */
+@@ -1298,6 +1336,15 @@ export class QueryBuilder {
+     return rows.map(rowToEdge);
+   }
+ 
++  getEdgesByRelation(relation: string): Edge[] {
++    const rows = this.db.prepare(`
++      SELECT * FROM edges
++      WHERE kind IN ('references', 'contains')
++        AND json_extract(metadata, '$.unityRelation') = ?
++    `).all(relation) as EdgeRow[];
++    return rows.map(rowToEdge);
++  }
++
+   /**
+    * Get incoming edges to a node
+    */
+diff --git a/src/extraction/index.ts b/src/extraction/index.ts
+index 0a76620..389b70a 100644
+--- a/src/extraction/index.ts
++++ b/src/extraction/index.ts
+@@ -20,6 +20,8 @@ import { extractFromSource } from './tree-sitter';
+ import { detectLanguage, isSourceFile, isLanguageSupported, isFileLevelOnlyLanguage, initGrammars, loadGrammarsForLanguages } from './grammars';
+ import { isUnityAssetMode, isUnityMode } from './unity-mode';
+ import { UNITY_ALL_IGNORE_DIRS, UNITY_ASSET_MODE_IGNORE_DIRS } from './unity-preset';
++import type { UnityAssetExtractionResult } from './unity/unity-asset-extractor';
++import { RawUnityEdge, resolveUnityEdges } from '../resolution/unity/unity-reference-resolver';
+ import { logDebug, logWarn } from '../errors';
+ import { validatePathWithinRoot, normalizePath } from '../utils';
+ import ignore, { Ignore } from 'ignore';
+@@ -526,6 +528,7 @@ export class ExtractionOrchestrator {
+    * hasn't run yet so single-file re-index paths can detect on the spot.
+    */
+   private detectedFrameworkNames: string[] | null = null;
++  private unityRawEdges: RawUnityEdge[] = [];
+ 
+   constructor(rootDir: string, queries: QueryBuilder) {
+     this.rootDir = rootDir;
+@@ -601,6 +604,60 @@ export class ExtractionOrchestrator {
+     return this.detectedFrameworkNames;
+   }
+ 
++  private resolveUnityAssetEdges(): number {
++    if (!isUnityAssetMode() || this.unityRawEdges.length === 0) return 0;
++
++    this.queries.buildUnityGuidIndex(this.rootDir);
++
++    const guidToNodeId = new Map<string, string>();
++    for (const row of this.queries.getUnityGuidRows()) {
++      if (row.assetType === 'script') {
++        const nodes = this.queries.getNodesByFile(row.assetPath);
++        const expectedName = path.basename(row.assetPath, path.extname(row.assetPath));
++        const classNode =
++          nodes.find((node) => node.kind === 'class' && node.name === expectedName) ??
++          nodes.find((node) => node.kind === 'class');
++        if (classNode) guidToNodeId.set(row.guid, classNode.id);
++        continue;
++      }
++
++      const expectedKind =
++        row.assetType === 'prefab' ? 'unity_prefab' :
++        row.assetType === 'scene' ? 'unity_scene' :
++        row.assetType === 'asset' ? 'unity_asset' :
++        null;
++      if (!expectedKind) continue;
++
++      const assetNode = this.queries
++        .getNodesByFile(row.assetPath)
++        .find((node) => node.kind === expectedKind);
++      if (assetNode) guidToNodeId.set(row.guid, assetNode.id);
++    }
++
++    const localAnchorsByFile = new Map<string, Map<number, string>>();
++    for (const node of this.queries.getUnityAnchorNodes()) {
++      const marker = node.qualifiedName.lastIndexOf('::');
++      if (marker < 0) continue;
++      const fileId = Number(node.qualifiedName.slice(marker + 2));
++      if (!Number.isFinite(fileId)) continue;
++      let anchors = localAnchorsByFile.get(node.filePath);
++      if (!anchors) {
++        anchors = new Map<number, string>();
++        localAnchorsByFile.set(node.filePath, anchors);
++      }
++      anchors.set(fileId, node.id);
++    }
++
++    const { resolved, placeholderNodes } = resolveUnityEdges(
++      this.unityRawEdges,
++      guidToNodeId,
++      localAnchorsByFile
++    );
++    if (placeholderNodes.length > 0) this.queries.insertNodes(placeholderNodes);
++    if (resolved.length > 0) this.queries.insertEdges(resolved);
++    return resolved.length;
++  }
++
+   /**
+    * Index all files in the project
+    */
+@@ -617,6 +674,7 @@ export class ExtractionOrchestrator {
+     let filesErrored = 0;
+     let totalNodes = 0;
+     let totalEdges = 0;
++    this.unityRawEdges = [];
+ 
+     const log = verbose
+       ? (msg: string) => { console.log(`[worker] ${msg}`); }
+@@ -1090,6 +1148,8 @@ export class ExtractionOrchestrator {
+       (parseWorker as import('worker_threads').Worker).terminate().catch(() => {});
+     }
+ 
++    totalEdges += this.resolveUnityAssetEdges();
++
+     return {
+       success: filesIndexed > 0 || errors.filter((e) => e.severity === 'error').length === 0,
+       filesIndexed,
+@@ -1301,6 +1361,13 @@ export class ExtractionOrchestrator {
+       }
+     }
+ 
++    if (isUnityAssetMode()) {
++      const unityRawEdges = (result as UnityAssetExtractionResult).unityRawEdges ?? [];
++      if (unityRawEdges.length > 0) {
++        this.unityRawEdges.push(...unityRawEdges);
++      }
++    }
++
+     // Insert unresolved references in batch with denormalized filePath/language
+     if (result.unresolvedReferences.length > 0) {
+       const insertedIds = new Set(validNodes.map((n) => n.id));
+diff --git a/src/index.ts b/src/index.ts
+index 0f6d7ac..19beee0 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -38,7 +38,7 @@ import {
+   extractFromSource,
+   initGrammars,
+ } from './extraction';
+-import { enableUnityModeIfMarked } from './extraction/unity-mode';
++import { enableUnityAssetModeIfMarked, enableUnityModeIfMarked } from './extraction/unity-mode';
+ import {
+   ReferenceResolver,
+   createResolver,
+@@ -242,6 +242,7 @@ export class CodeGraph {
+     // A project initialized via `codegraph unity init` carries a marker; honor it
+     // so sync/serve/index stay Unity-aware without re-passing the subcommand.
+     enableUnityModeIfMarked(resolvedRoot);
++    enableUnityAssetModeIfMarked(resolvedRoot);
+ 
+     // Check if initialized
+     if (!isInitialized(resolvedRoot)) {
+@@ -275,6 +276,9 @@ export class CodeGraph {
+   static openSync(projectRoot: string): CodeGraph {
+     const resolvedRoot = path.resolve(projectRoot);
+ 
++    enableUnityModeIfMarked(resolvedRoot);
++    enableUnityAssetModeIfMarked(resolvedRoot);
++
+     // Check if initialized
+     if (!isInitialized(resolvedRoot)) {
+       throw new Error(`CodeGraph not initialized in ${resolvedRoot}. Run init() first.`);
+@@ -738,6 +742,10 @@ export class CodeGraph {
+     return this.queries.getIncomingEdges(nodeId);
+   }
+ 
++  getEdgesByRelation(relation: string): Edge[] {
++    return this.queries.getEdgesByRelation(relation);
++  }
++
+   // ===========================================================================
+   // File Operations
+   // ===========================================================================

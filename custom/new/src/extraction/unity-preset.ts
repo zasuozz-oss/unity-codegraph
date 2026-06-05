@@ -29,6 +29,12 @@ export const UNITY_ASSET_EXTENSIONS: ReadonlySet<string> = new Set([
   '.prefab', '.unity', '.asset', '.meta', '.asmdef',
 ]);
 
+/** Asset extensions that produce graph nodes in full-asset mode.
+ * `.meta` is a GUID sidecar and `.asmdef` has its own extractor. */
+export const UNITY_ASSET_NODE_EXTENSIONS: ReadonlySet<string> = new Set([
+  '.prefab', '.unity', '.asset',
+]);
+
 // ============================================================================
 // SKIPPED — directories never walked in Unity mode
 // ============================================================================
@@ -105,6 +111,12 @@ export const UNITY_ALL_IGNORE_DIRS: readonly string[] = [
   ...UNITY_ENGINE_IGNORE_DIRS,
   ...Object.keys(UNITY_SDK_DIRS),
   ...UNITY_ASSET_ONLY_DIRS,
+];
+
+/** Directories ignored in full-asset mode: engine/generated + SDKs, but not asset dirs. */
+export const UNITY_ASSET_MODE_IGNORE_DIRS: readonly string[] = [
+  ...UNITY_ENGINE_IGNORE_DIRS.filter((d) => d !== 'ProjectSettings'),
+  ...Object.keys(UNITY_SDK_DIRS),
 ];
 
 // ============================================================================

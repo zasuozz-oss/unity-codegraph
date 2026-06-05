@@ -1,0 +1,214 @@
+diff --git a/src/mcp/tools.ts b/src/mcp/tools.ts
+index 38e343b..af08a51 100644
+--- a/src/mcp/tools.ts
++++ b/src/mcp/tools.ts
+@@ -76,6 +76,11 @@ const CONTAINER_NODE_KINDS = new Set<NodeKind>([
+   'class', 'struct', 'interface', 'trait', 'protocol', 'enum', 'namespace', 'module',
+ ]);
+ 
++const DEFAULT_SEARCH_HIDDEN_KINDS = new Set<NodeKind>([
++  'unity_gameobject',
++  'unity_component',
++]);
++
+ /** Last `::` / `.` / `/`-separated segment of a qualified symbol. */
+ function lastQualifierPart(symbol: string): string {
+   const parts = symbol.split(/::|[./]/).filter((p) => p.length > 0);
+@@ -546,6 +551,31 @@ export const tools: ToolDefinition[] = [
+       required: ['symbol'],
+     },
+   },
++  {
++    name: 'unity_find_missing_scripts',
++    description: 'Unity: list prefabs/scenes/assets with missing MonoBehaviour scripts.',
++    inputSchema: {
++      type: 'object',
++      properties: {
++        projectPath: projectPathProperty,
++      },
++    },
++  },
++  {
++    name: 'unity_find_references_to_asset',
++    description: 'Unity: list prefabs/scenes/assets that reference a Unity asset path or name.',
++    inputSchema: {
++      type: 'object',
++      properties: {
++        asset: {
++          type: 'string',
++          description: 'Unity asset path or file name, e.g. "Assets/ScriptableObjects/Items.asset" or "Items.asset"',
++        },
++        projectPath: projectPathProperty,
++      },
++      required: ['asset'],
++    },
++  },
+   {
+     name: 'codegraph_explore',
+     description: 'Source of SEVERAL related symbols grouped by file, in one capped call. Query is a bag of symbol/file names (not a question). Returned source is verbatim Read-equivalent — do not re-open shown files. Prefer over chained codegraph_node.',
+@@ -1107,6 +1137,10 @@ export class ToolHandler {
+           result = await this.handleCallees(args); break;
+         case 'codegraph_impact':
+           result = await this.handleImpact(args); break;
++        case 'unity_find_missing_scripts':
++          result = await this.handleUnityFindMissingScripts(args); break;
++        case 'unity_find_references_to_asset':
++          result = await this.handleUnityFindReferencesToAsset(args); break;
+         case 'codegraph_explore':
+           result = await this.handleExplore(args); break;
+         case 'codegraph_node':
+@@ -1142,19 +1176,24 @@ export class ToolHandler {
+     const rawLimit = Number(args.limit) || 10;
+     const limit = clamp(rawLimit, 1, 100);
+ 
++    const searchLimit = kind ? limit : Math.min(limit * 3, 100);
+     const results = cg.searchNodes(query, {
+-      limit,
++      limit: searchLimit,
+       kinds: kind ? [kind as NodeKind] : undefined,
+     });
+ 
+-    if (results.length === 0) {
++    const visibleResults = kind
++      ? results
++      : results.filter((result) => !DEFAULT_SEARCH_HIDDEN_KINDS.has(result.node.kind)).slice(0, limit);
++
++    if (visibleResults.length === 0) {
+       return this.textResult(`No results found for "${query}"`);
+     }
+ 
+     // Down-rank generated files within the FTS-returned set so a search
+     // for "Send" surfaces the hand-written keeper before .pb.go stubs
+     // that share the name. Stable: only reorders generated vs. not.
+-    const ranked = [...results].sort((a, b) => {
++    const ranked = [...visibleResults].sort((a, b) => {
+       const aGen = isGeneratedFile(a.node.filePath) ? 1 : 0;
+       const bGen = isGeneratedFile(b.node.filePath) ? 1 : 0;
+       return aGen - bGen;
+@@ -1535,6 +1574,76 @@ export class ToolHandler {
+     return this.textResult(this.truncateOutput(formatted));
+   }
+ 
++  private async handleUnityFindMissingScripts(args: Record<string, unknown>): Promise<ToolResult> {
++    const cg = this.getCodeGraph(args.projectPath as string | undefined);
++    const edges = cg.getEdgesByRelation('missing_script');
++    if (edges.length === 0) {
++      return this.textResult('No missing Unity scripts found.');
++    }
++
++    const seen = new Set<string>();
++    const lines = [`## Missing Unity Scripts (${edges.length} edge${edges.length === 1 ? '' : 's'})`, ''];
++    for (const edge of edges) {
++      const source = cg.getNode(edge.source);
++      const metadata = (edge.metadata ?? {}) as Record<string, unknown>;
++      const filePath = source?.filePath ?? String(metadata.filePath ?? edge.source);
++      const guid = typeof metadata.guid === 'string' ? ` guid=${metadata.guid}` : '';
++      const key = `${filePath}:${guid}`;
++      if (seen.has(key)) continue;
++      seen.add(key);
++      lines.push(`- ${filePath}${guid}`);
++    }
++
++    return this.textResult(this.truncateOutput(lines.join('\n')));
++  }
++
++  private async handleUnityFindReferencesToAsset(args: Record<string, unknown>): Promise<ToolResult> {
++    const asset = this.validateString(args.asset, 'asset');
++    if (typeof asset !== 'string') return asset;
++
++    const cg = this.getCodeGraph(args.projectPath as string | undefined);
++    const normalized = asset.replace(/\\/g, '/');
++    const candidates = cg.searchNodes(asset, { limit: 50 })
++      .map((result) => result.node)
++      .filter((node) =>
++        (node.kind === 'unity_asset' || node.kind === 'unity_prefab' || node.kind === 'unity_scene') &&
++        (node.filePath === normalized || node.filePath.endsWith(`/${normalized}`) || node.name === asset)
++      );
++
++    if (candidates.length === 0) {
++      return this.textResult(`Unity asset "${asset}" not found.`);
++    }
++
++    const referenceRelations = new Set([
++      'serialized_field_references_asset',
++      'scene_references_prefab',
++      'addressable_references_asset',
++    ]);
++    const lines = [`## Unity References to ${asset}`, ''];
++    const seen = new Set<string>();
++
++    for (const target of candidates) {
++      for (const edge of cg.getIncomingEdges(target.id)) {
++        const relation = (edge.metadata as any)?.unityRelation;
++        if (!referenceRelations.has(relation)) continue;
++        const source = cg.getNode(edge.source);
++        if (!source) continue;
++        const field = typeof (edge.metadata as any)?.fieldName === 'string'
++          ? ` field=${(edge.metadata as any).fieldName}`
++          : '';
++        const key = `${source.filePath}:${relation}:${field}`;
++        if (seen.has(key)) continue;
++        seen.add(key);
++        lines.push(`- ${source.filePath} (${relation}${field})`);
++      }
++    }
++
++    if (seen.size === 0) {
++      return this.textResult(`No Unity references found for "${asset}".`);
++    }
++    return this.textResult(this.truncateOutput(lines.join('\n')));
++  }
++
+   /**
+    * Handle codegraph_trace — shortest CALL PATH between two symbols.
+    *
+@@ -3510,6 +3619,27 @@ export class ToolHandler {
+       lines.push('');
+     }
+ 
++    const unityAttachmentFiles = new Set<string>();
++    for (const node of impact.nodes.values()) {
++      if (
++        node.kind === 'unity_prefab' ||
++        node.kind === 'unity_scene' ||
++        node.kind === 'unity_asset' ||
++        node.kind === 'unity_gameobject' ||
++        node.kind === 'unity_component'
++      ) {
++        unityAttachmentFiles.add(node.filePath);
++      }
++    }
++
++    if (unityAttachmentFiles.size > 0) {
++      lines.push('**Unity attachments:**');
++      for (const file of [...unityAttachmentFiles].sort()) {
++        lines.push(`- ${file}`);
++      }
++      lines.push('');
++    }
++
+     return lines.join('\n');
+   }
+ 
+diff --git a/src/mcp/server-instructions.ts b/src/mcp/server-instructions.ts
+index db9949a..cb646cd 100644
+--- a/src/mcp/server-instructions.ts
++++ b/src/mcp/server-instructions.ts
+@@ -42,6 +42,9 @@ of calls; a grep/read exploration is dozens.
+ - **"What calls this?"** → \`codegraph_callers\`
+ - **"What does this call?"** → \`codegraph_callees\`
+ - **"What would changing this break?"** → \`codegraph_impact\`
++- **"What Unity prefabs/scenes does this MonoBehaviour affect?"** → \`codegraph_impact\` (surfaces Unity attachments when indexed with full-asset mode)
++- **"Which Unity prefabs/scenes have missing scripts?"** → \`unity_find_missing_scripts\`
++- **"Which Unity prefabs/scenes/addressables reference this asset?"** → \`unity_find_references_to_asset\`
+ - **"Show me this symbol's source / signature / docstring."** → \`codegraph_node\`
+ - **"Show me several related symbols' source / survey an area."** → \`codegraph_explore\` (ONE capped call; prefer over many codegraph_node/Read)
+ - **"What's in directory X?"** → \`codegraph_files\`
+@@ -52,6 +55,7 @@ of calls; a grep/read exploration is dozens.
+ - **Flow / "how does X reach Y"**: \`codegraph_trace\` from→to FIRST — one call returns the entire path with dynamic-dispatch hops bridged. Then ONE \`codegraph_explore\` for the hop bodies if you need them. Do NOT reconstruct the path with \`codegraph_search\` + \`codegraph_callers\` — that's exactly what trace does in a single call.
+ - **Onboarding**: \`codegraph_context\` first. If still unclear, \`codegraph_explore\` for breadth, then \`codegraph_node\` on specific symbols.
+ - **Refactor planning**: \`codegraph_search\` → \`codegraph_callers\` → \`codegraph_impact\`. The blast-radius answer comes from impact, not from walking callers manually.
++- **Unity MonoBehaviour change**: \`codegraph_impact\` first. In Unity full-asset indexes it includes prefab/scene attachments, so do not grep \`.prefab\`/\`.unity\` files first.
+ - **Debugging a regression**: \`codegraph_callers\` of the suspected symbol; widen with \`codegraph_impact\` if an unexpected call appears.
+ 
+ ## Anti-patterns

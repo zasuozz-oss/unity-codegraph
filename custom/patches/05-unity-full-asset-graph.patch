@@ -1,0 +1,251 @@
+diff --git a/src/bin/codegraph.ts b/src/bin/codegraph.ts
+index a94ed1b..0000000 100644
+--- a/src/bin/codegraph.ts
++++ b/src/bin/codegraph.ts
+@@ -32,7 +32,12 @@ import { getGlyphs } from '../ui/glyphs';
+ 
+ import { buildNode25BlockBanner, buildNodeTooOldBanner, MIN_NODE_MAJOR } from './node-version-check';
+ import { relaunchWithWasmRuntimeFlagsIfNeeded } from '../extraction/wasm-runtime-flags';
+-import { enableUnityMode, writeUnityMarker } from '../extraction/unity-mode';
++import {
++  enableUnityMode,
++  writeUnityMarker,
++  enableUnityAssetMode,
++  writeUnityAssetMarker,
++} from '../extraction/unity-mode';
+ 
+ // Lazy-load heavy modules (CodeGraph, runInstaller) to keep CLI startup fast.
+ async function loadCodeGraph(): Promise<typeof import('../index')> {
+@@ -1755,23 +1760,32 @@ program
+   .allowExcessArguments(true)
+   .helpOption(false)
+   .action(async (commandArgs: string[]) => {
+-    enableUnityMode();
+-
+     // Everything after the literal `unity` token, verbatim (flags included).
+     const unityIdx = process.argv.indexOf('unity');
+     const forwarded = unityIdx >= 0 ? process.argv.slice(unityIdx + 1) : (commandArgs || []);
++    const wantAssets = forwarded.includes('--assets');
++    const strippedForwarded = forwarded.filter((a) => a !== '--assets');
++
++    if (wantAssets) {
++      enableUnityAssetMode();
++    } else {
++      enableUnityMode();
++    }
+ 
+-    if (forwarded.length === 0) {
++    if (strippedForwarded.length === 0) {
+       program.outputHelp();
+       return;
+     }
+ 
+     // Persist the Unity marker for init/index/sync once the project dir exists.
+     // writeUnityMarker is a no-op if `.codegraph/` isn't there (e.g. failed init).
+-    const sub = forwarded[0];
++    const sub = strippedForwarded[0];
+     if (sub === 'init' || sub === 'index' || sub === 'sync') {
+-      const pathArg = forwarded.slice(1).find((a) => !a.startsWith('-'));
++      const pathArg = strippedForwarded.slice(1).find((a) => !a.startsWith('-'));
+       const projectPath = path.resolve(pathArg || process.cwd());
+-      process.once('exit', () => writeUnityMarker(projectPath));
++      process.once('exit', () => {
++        if (wantAssets) writeUnityAssetMarker(projectPath);
++        else writeUnityMarker(projectPath);
++      });
+     }
+ 
+     // Re-dispatch into the real command tree with Unity mode already on.
+-    await program.parseAsync(['node', 'codegraph', ...forwarded]);
++    await program.parseAsync(['node', 'codegraph', ...strippedForwarded]);
+   });
+ 
+ // Parse and run
+diff --git a/src/db/migrations.ts b/src/db/migrations.ts
+index 7bf77f5..0000000 100644
+--- a/src/db/migrations.ts
++++ b/src/db/migrations.ts
+@@ -9,7 +9,7 @@ import { SqliteDatabase } from './sqlite-adapter';
+ /**
+  * Current schema version
+  */
+-export const CURRENT_SCHEMA_VERSION = 4;
++export const CURRENT_SCHEMA_VERSION = 5;
+ 
+ /**
+  * Migration definition
+@@ -63,6 +63,22 @@ const migrations: Migration[] = [
+       `);
+     },
+   },
++  {
++    version: 5,
++    description: 'Add unity_guids table for Unity full-asset GUID index',
++    up: (db) => {
++      db.exec(`
++        CREATE TABLE IF NOT EXISTS unity_guids (
++          guid         TEXT PRIMARY KEY,
++          asset_path   TEXT NOT NULL,
++          asset_type   TEXT NOT NULL,
++          main_file_id INTEGER,
++          updated_at   INTEGER NOT NULL
++        );
++        CREATE INDEX IF NOT EXISTS idx_unity_guids_path ON unity_guids(asset_path);
++      `);
++    },
++  },
+ ];
+ 
+ /**
+diff --git a/src/db/schema.sql b/src/db/schema.sql
+index 20bc97e..0000000 100644
+--- a/src/db/schema.sql
++++ b/src/db/schema.sql
+@@ -80,6 +80,16 @@ CREATE TABLE IF NOT EXISTS unresolved_refs (
+     FOREIGN KEY (from_node_id) REFERENCES nodes(id) ON DELETE CASCADE
+ );
+ 
++-- Unity GUID → asset map (full-asset mode only)
++CREATE TABLE IF NOT EXISTS unity_guids (
++    guid         TEXT PRIMARY KEY,
++    asset_path   TEXT NOT NULL,
++    asset_type   TEXT NOT NULL,
++    main_file_id INTEGER,
++    updated_at   INTEGER NOT NULL
++);
++CREATE INDEX IF NOT EXISTS idx_unity_guids_path ON unity_guids(asset_path);
++
+ -- =============================================================================
+ -- Indexes for Query Performance
+ -- =============================================================================
+diff --git a/src/extraction/grammars.ts b/src/extraction/grammars.ts
+index 84d8a78..0000000 100644
+--- a/src/extraction/grammars.ts
++++ b/src/extraction/grammars.ts
+@@ -9,7 +9,8 @@
+ import * as path from 'path';
+ import { Parser, Language as WasmLanguage } from 'web-tree-sitter';
+ import { Language } from '../types';
+-import { UNITY_ASSET_EXTENSIONS } from './unity-preset';
++import { isUnityAssetMode } from './unity-mode';
++import { UNITY_ASSET_EXTENSIONS, UNITY_ASSET_NODE_EXTENSIONS } from './unity-preset';
+ 
+ export type GrammarLanguage = Exclude<Language, 'svelte' | 'vue' | 'liquid' | 'yaml' | 'twig' | 'xml' | 'properties' | 'unity_asset' | 'unity_asmdef' | 'unknown'>;
+ 
+@@ -115,9 +116,8 @@ export const EXTENSION_MAP: Record<string, Language> = {
+ };
+ 
+ // Unity asset extensions (`UNITY_ASSET_EXTENSIONS`, from unity-preset) appear in
+-// EXTENSION_MAP for documentation only — `detectLanguage` and `isSourceFile` skip
+-// them unconditionally, so any Unity project indexes pure game C# (gitnexus
+-// parity): no prefab/scene/asset/meta nodes, in Unity mode or not.
++// EXTENSION_MAP for documentation. They are opened only in full-asset mode; base
++// Unity mode keeps the gitnexus-style C#-only graph.
+ 
+ /**
+  * Whether a file is one CodeGraph can parse, based purely on its extension.
+@@ -129,8 +129,11 @@ export function isSourceFile(filePath: string): boolean {
+   const dot = filePath.lastIndexOf('.');
+   if (dot < 0) return false;
+   const ext = filePath.slice(dot).toLowerCase();
+-  // Unity assets are never indexed — gitnexus parity: the graph is C# only.
+-  if (UNITY_ASSET_EXTENSIONS.has(ext)) return false;
++  if (UNITY_ASSET_EXTENSIONS.has(ext)) {
++    if (ext === '.meta') return false;
++    if (!isUnityAssetMode()) return false;
++    return UNITY_ASSET_NODE_EXTENSIONS.has(ext) || ext === '.asmdef';
++  }
+   return ext in EXTENSION_MAP;
+ }
+ 
+@@ -254,8 +258,12 @@ export function detectLanguage(filePath: string, source?: string): Language {
+   // Play framework resolver extracts route nodes from it.
+   if (isPlayRoutesFile(filePath)) return 'yaml';
+   const ext = filePath.substring(filePath.lastIndexOf('.')).toLowerCase();
+-  // Unity assets resolve to 'unknown' — never parsed (gitnexus parity: C# only).
+-  if (UNITY_ASSET_EXTENSIONS.has(ext)) return 'unknown';
++  if (UNITY_ASSET_EXTENSIONS.has(ext)) {
++    if (ext === '.meta' || !isUnityAssetMode()) return 'unknown';
++    if (ext === '.asmdef') return 'unity_asmdef';
++    if (UNITY_ASSET_NODE_EXTENSIONS.has(ext)) return 'unity_asset';
++    return 'unknown';
++  }
+   const lang = EXTENSION_MAP[ext] || 'unknown';
+ 
+   // .h files could be C, C++, or Objective-C — check source content
+diff --git a/src/extraction/index.ts b/src/extraction/index.ts
+index 522d4bb..0000000 100644
+--- a/src/extraction/index.ts
++++ b/src/extraction/index.ts
+@@ -18,8 +18,8 @@ import {
+ import { QueryBuilder } from '../db/queries';
+ import { extractFromSource } from './tree-sitter';
+ import { detectLanguage, isSourceFile, isLanguageSupported, isFileLevelOnlyLanguage, initGrammars, loadGrammarsForLanguages } from './grammars';
+-import { isUnityMode } from './unity-mode';
+-import { UNITY_ALL_IGNORE_DIRS } from './unity-preset';
++import { isUnityAssetMode, isUnityMode } from './unity-mode';
++import { UNITY_ALL_IGNORE_DIRS, UNITY_ASSET_MODE_IGNORE_DIRS } from './unity-preset';
+ import { logDebug, logWarn } from '../errors';
+ import { validatePathWithinRoot, normalizePath } from '../utils';
+ import ignore, { Ignore } from 'ignore';
+@@ -174,7 +174,11 @@ const DEFAULT_IGNORE_PATTERNS: string[] = [
+ export function buildDefaultIgnore(rootDir: string): Ignore {
+   const ig = ignore().add(DEFAULT_IGNORE_PATTERNS);
+   // Unity-only ignore dirs are added at runtime so they apply solely in Unity mode.
+-  if (isUnityMode()) ig.add(UNITY_ALL_IGNORE_DIRS.map((d) => `${d}/`));
++  if (isUnityAssetMode()) {
++    ig.add(UNITY_ASSET_MODE_IGNORE_DIRS.map((d) => `${d}/`));
++  } else if (isUnityMode()) {
++    ig.add(UNITY_ALL_IGNORE_DIRS.map((d) => `${d}/`));
++  }
+   try {
+     const rootGitignore = path.join(rootDir, '.gitignore');
+     if (fs.existsSync(rootGitignore)) ig.add(fs.readFileSync(rootGitignore, 'utf-8'));
+diff --git a/src/extraction/tree-sitter.ts b/src/extraction/tree-sitter.ts
+index b180545..0000000 100644
+--- a/src/extraction/tree-sitter.ts
++++ b/src/extraction/tree-sitter.ts
+@@ -22,6 +22,7 @@ import { SvelteExtractor } from './svelte-extractor';
+ import { DfmExtractor } from './dfm-extractor';
+ import { VueExtractor } from './vue-extractor';
+ import { MyBatisExtractor } from './mybatis-extractor';
++import { UnityAssetExtractor } from './unity/unity-asset-extractor';
+ import {
+   getAllFrameworkResolvers,
+   getApplicableFrameworks,
+@@ -3097,6 +3098,9 @@ export function extractFromSource(
+     // file node so the watcher tracks it without emitting symbols.
+     const extractor = new MyBatisExtractor(filePath, source);
+     result = extractor.extract();
++  } else if (detectedLanguage === 'unity_asset') {
++    const extractor = new UnityAssetExtractor(filePath, source);
++    result = extractor.extract();
+   } else if (isFileLevelOnlyLanguage(detectedLanguage)) {
+     // No symbol extraction at this stage — files are tracked at the file-record
+     // level only. Framework extractors (Drupal routing yml, Spring `@Value`
+diff --git a/src/types.ts b/src/types.ts
+index a0a1306..0000000 100644
+--- a/src/types.ts
++++ b/src/types.ts
+@@ -30,6 +30,12 @@ export const NODE_KINDS = [
+   'export',
+   'route',
+   'component',
++  'unity_scene',
++  'unity_prefab',
++  'unity_asset',
++  'unity_gameobject',
++  'unity_component',
++  'unity_script',
+ ] as const;
+ 
+ export type NodeKind = (typeof NODE_KINDS)[number];
+@@ -179,7 +185,7 @@ export interface Edge {
+   column?: number;
+ 
+   /** How this edge was created */
+-  provenance?: 'tree-sitter' | 'scip' | 'heuristic';
++  provenance?: 'tree-sitter' | 'scip' | 'heuristic' | 'unity';
+ }
+ 
+ /**

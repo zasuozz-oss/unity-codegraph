@@ -6,7 +6,8 @@ export type NodeLabel =
   | 'Community' | 'Process' | 'Struct' | 'Macro' | 'Typedef'
   | 'Union' | 'Namespace' | 'Trait' | 'Impl' | 'TypeAlias'
   | 'Const' | 'Static' | 'Property' | 'Record' | 'Delegate'
-  | 'Annotation' | 'Constructor' | 'Template' | 'Section' | 'Route' | 'Tool';
+  | 'Annotation' | 'Constructor' | 'Template' | 'Section' | 'Route' | 'Tool'
+  | 'UnityScene' | 'UnityPrefab' | 'UnityAsset' | 'UnityGameObject' | 'UnityComponent';
 
 export interface NodeProperties {
   name: string;

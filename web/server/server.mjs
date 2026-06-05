@@ -16,19 +16,9 @@ import { createServer } from 'node:http';
 import { readFileSync, existsSync, statSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { listProjects, removeProject, dbPathFor, registryPath } from './registry.mjs';
+import { isHiddenNodeRow, mapNodeRow } from './graph-mapper.mjs';
 
 const PORT = Number(process.env.PORT) || 4319;
-
-// --- codegraph kind -> GitNexus NodeLabel ---
-const KIND_TO_LABEL = {
-  file: 'File', module: 'Module', namespace: 'Namespace',
-  class: 'Class', struct: 'Struct', interface: 'Interface', trait: 'Trait',
-  protocol: 'Interface', enum: 'Enum', enum_member: 'CodeElement',
-  function: 'Function', method: 'Method', property: 'Property', field: 'Property',
-  variable: 'Variable', constant: 'Const', parameter: 'CodeElement',
-  type_alias: 'TypeAlias', import: 'Import', export: 'CodeElement',
-  route: 'Route', component: 'Class',
-};
 
 // --- codegraph edge kind -> GitNexus RelationshipType ---
 const EDGE_TO_TYPE = {
@@ -68,18 +58,10 @@ function buildGraph(db, { includeImports }) {
   const nodeRows = db.prepare(`
     SELECT id, kind, name, qualified_name, file_path, language, start_line, end_line
     FROM nodes ${includeImports ? '' : "WHERE kind != 'import'"}
-  `).all();
+  `).all().filter((r) => !isHiddenNodeRow(r));
   const nodeIds = new Set(nodeRows.map((r) => r.id));
 
-  const nodes = nodeRows.map((r) => ({
-    id: r.id,
-    label: KIND_TO_LABEL[r.kind] || 'CodeElement',
-    properties: {
-      name: r.name, filePath: r.file_path,
-      startLine: r.start_line, endLine: r.end_line,
-      language: r.language, kind: r.kind,
-    },
-  }));
+  const nodes = nodeRows.map(mapNodeRow);
 
   const edgeRows = db.prepare(`SELECT id, source, target, kind FROM edges`).all();
   const relationships = [];

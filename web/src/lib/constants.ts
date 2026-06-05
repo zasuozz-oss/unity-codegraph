@@ -38,6 +38,11 @@ export const NODE_COLORS: Record<NodeLabel, string> = {
   Template: '#a78bfa',
   Route: '#f43f5e',
   Tool: '#a855f7',
+  UnityScene: '#22d3ee',
+  UnityPrefab: '#0ea5e9',
+  UnityAsset: '#38bdf8',
+  UnityGameObject: '#7dd3fc',
+  UnityComponent: '#a5f3fc',
 };
 
 // Node sizes by type - clear visual hierarchy
@@ -78,6 +83,11 @@ export const NODE_SIZES: Record<NodeLabel, number> = {
   Template: 3,
   Route: 5,
   Tool: 5,
+  UnityScene: 12,
+  UnityPrefab: 9,
+  UnityAsset: 7,
+  UnityGameObject: 4,
+  UnityComponent: 3,
 };
 
 export const COMMUNITY_COLORS = [
@@ -94,6 +104,7 @@ export const DEFAULT_VISIBLE_LABELS: NodeLabel[] = [
   'Project', 'Package', 'Module', 'Namespace', 'Folder', 'File',
   'Class', 'Struct', 'Function', 'Method', 'Interface', 'Trait',
   'Enum', 'Type', 'Property', 'Route',
+  'UnityScene', 'UnityPrefab', 'UnityAsset',
 ];
 
 // Edge/Relation types surfaced by the codegraph mapping
