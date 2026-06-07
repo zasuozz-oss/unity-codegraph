@@ -37,6 +37,26 @@ describe('codegraph unity CLI registry integration', () => {
     expect(registry.projects).toContainEqual(
       expect.objectContaining({ name: 'MiniUnity', path: normalized }),
     );
+
+    const agentsContent = fs.readFileSync(path.join(project, 'AGENTS.md'), 'utf8');
+    const claudeContent = fs.readFileSync(path.join(project, 'CLAUDE.md'), 'utf8');
+    expect(agentsContent).toContain('<!-- codegraph:start -->');
+    expect(agentsContent).toContain('CodeGraph Unity - Project Instructions');
+    expect(agentsContent).toContain('codegraph-unity-guide');
+    expect(claudeContent).toContain('<!-- codegraph:start -->');
+    expect(claudeContent).toContain('CodeGraph Unity - Project Instructions');
+    expect(claudeContent).toContain('codegraph-unity-guide');
+
+    const localSkillNames = [
+      'codegraph-unity-exploring',
+      'codegraph-unity-guide',
+      'codegraph-unity-impact',
+      'codegraph-unity-refactoring',
+    ];
+    for (const skillName of localSkillNames) {
+      expect(fs.existsSync(path.join(project, '.agents', 'skills', skillName, 'SKILL.md'))).toBe(true);
+      expect(fs.existsSync(path.join(project, '.claude', 'skills', skillName, 'SKILL.md'))).toBe(true);
+    }
   });
 
   it('accepts legacy --assets while indexing C# only', () => {

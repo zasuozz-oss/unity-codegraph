@@ -21,6 +21,32 @@ warn() { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 err()  { echo -e "${RED}[ERROR]${NC} $*"; }
 step() { echo -e "\n${CYAN}── $* ──${NC}"; }
 
+run_with_timeout() {
+  local seconds="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$seconds" "$@"
+  else
+    node -e '
+      const [seconds, cmd, ...args] = process.argv.slice(1);
+      const child = require("child_process").spawn(cmd, args, { stdio: "inherit" });
+      let killed = false;
+      const timer = setTimeout(() => {
+        killed = true;
+        child.kill("SIGTERM");
+        setTimeout(() => child.kill("SIGKILL"), 5000).unref();
+      }, Number(seconds) * 1000);
+      child.on("exit", (code, signal) => {
+        clearTimeout(timer);
+        if (killed || signal) {
+          console.error(`Timed out after ${seconds}s: ${cmd} ${args.join(" ")}`);
+          process.exit(124);
+        }
+        process.exit(code ?? 0);
+      });
+    ' "$seconds" "$@"
+  fi
+}
+
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*) OS="windows" ;;
   Darwin) OS="macos" ;;
@@ -34,11 +60,6 @@ UPSTREAM_REPO="https://github.com/${UPSTREAM_SLUG}.git"
 UPSTREAM_DIR="$SCRIPT_DIR/codegraph"
 CUSTOM_SKILLS_DIR="$SCRIPT_DIR/custom/skills"
 CLI="$UPSTREAM_DIR/dist/bin/codegraph.js"
-
-# Skill destinations per agent (see custom/skills/README.md).
-CLAUDE_SKILLS_DIR="$HOME/.claude/skills"
-GEMINI_SKILLS_DIR="$HOME/.gemini/config/skills"
-CODEX_SKILLS_DIR="${CODEX_HOME:-$HOME/.codex}/skills"
 
 # ── No-sudo guards / self-heal helpers ───────────────────────
 # This script must run as your normal user. Running it with sudo makes the clone
@@ -119,8 +140,12 @@ apply_overlay() {
 # ── Build + globally link the CLI ────────────────────────────
 # True iff the `codegraph` on PATH is THIS Unity-enabled build (has `unity` cmd).
 codegraph_has_unity() {
-  command -v codegraph >/dev/null 2>&1 \
-    && codegraph --help 2>/dev/null | grep -q "unity \[command"
+  command -v codegraph >/dev/null 2>&1 || return 1
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 10 codegraph --help 2>/dev/null | grep -q "unity \[command"
+  else
+    codegraph --help 2>/dev/null | grep -q "unity \[command"
+  fi
 }
 
 # Put a Unity-enabled `codegraph` on PATH (idempotent). Tries `npm link`, then a
@@ -132,8 +157,10 @@ link_unity_cli() {
   # thin-installer) owns the `codegraph` bin and shadows our local link. We don't
   # need to remove it: the verified fallback below overwrites the bin SYMLINK
   # (which lives in a user-owned dir, so no sudo needed) to point at this build.
-  npm rm -g @colbymchenry/codegraph >/dev/null 2>&1 || true
-  ( cd "$UPSTREAM_DIR" && npm link >/dev/null 2>&1 ) || true
+  info "Removing any published global @colbymchenry/codegraph shim"
+  run_with_timeout 30 npm rm -g @colbymchenry/codegraph || true
+  info "Linking this Unity-enabled local build"
+  ( cd "$UPSTREAM_DIR" && run_with_timeout 60 npm link ) || true
   hash -r 2>/dev/null || true
   codegraph_has_unity && return 0
 
@@ -162,7 +189,10 @@ build_cli() {
     warn "Default npm cache has root-owned files (prior sudo run); using $npm_config_cache"
   fi
 
-  ( cd "$UPSTREAM_DIR" && npm install && npm run build )
+  info "Installing codegraph dependencies"
+  ( cd "$UPSTREAM_DIR" && run_with_timeout 120 npm install )
+  info "Building codegraph TypeScript output"
+  ( cd "$UPSTREAM_DIR" && run_with_timeout 120 npm run build )
   [ -f "$CLI" ] || { err "Build produced no $CLI"; exit 1; }
   chmod +x "$CLI" 2>/dev/null || true
 
@@ -198,42 +228,11 @@ configure_mcp() {
   fi
 }
 
-# ── Install Unity skills into each agent ─────────────────────
+# ── Unity skills are installed per indexed project ───────────
 install_skills() {
-  step "Installing Unity skills"
+  step "Unity skills"
   [ -d "$CUSTOM_SKILLS_DIR" ] || { warn "No custom/skills dir"; return; }
-  local target
-  for target in "$CLAUDE_SKILLS_DIR" "$GEMINI_SKILLS_DIR" "$CODEX_SKILLS_DIR"; do
-    mkdir -p "$target" 2>/dev/null || true
-    # A prior `sudo` run can leave an agent's skills dir root-owned; skip it with
-    # guidance rather than aborting the whole setup (the OS needs root to reclaim).
-    if [ ! -w "$target" ]; then
-      warn "Skipping $target — not writable (root-owned from a prior sudo run)."
-      warn "  Reclaim once:  sudo chown -R $(id -u):$(id -g) \"$target\""
-      continue
-    fi
-    local n=0 d name f
-    # Support folder-based skills (each containing SKILL.md)
-    for d in "$CUSTOM_SKILLS_DIR"/*/; do
-      [ -d "$d" ] || continue
-      name="$(basename "$d")"
-      if [ -f "$d/SKILL.md" ]; then
-        if mkdir -p "$target/$name" 2>/dev/null && cp "$d/SKILL.md" "$target/$name/SKILL.md" 2>/dev/null; then
-          n=$((n + 1))
-        fi
-      fi
-    done
-    # Support legacy file-based skills (*.md directly in CUSTOM_SKILLS_DIR)
-    for f in "$CUSTOM_SKILLS_DIR"/*.md; do
-      [ -f "$f" ] || continue
-      name="$(basename "$f" .md)"
-      [ "$name" = "README" ] && continue
-      if mkdir -p "$target/$name" 2>/dev/null && cp "$f" "$target/$name/SKILL.md" 2>/dev/null; then
-        n=$((n + 1))
-      fi
-    done
-    ok "$n skill(s) → $target"
-  done
+  ok "Unity skills will be installed project-locally by 'codegraph unity init'"
 }
 
 # ── Initialize the global project registry the dashboard reads ──────────

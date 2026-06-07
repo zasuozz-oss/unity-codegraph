@@ -1,0 +1,68 @@
+diff --git a/src/bin/codegraph.ts b/src/bin/codegraph.ts
+--- a/src/bin/codegraph.ts
++++ b/src/bin/codegraph.ts
+@@ -35,6 +35,7 @@ import { buildNode25BlockBanner, buildNodeTooOldBanner, MIN_NODE_MAJOR } from './node-version-check';
+ import { relaunchWithWasmRuntimeFlagsIfNeeded } from '../extraction/wasm-runtime-flags';
+ import {
+   enableUnityMode,
++  isUnityMode,
+   writeUnityMarker,
+ } from '../extraction/unity-mode';
+ import { upsertProject } from '../registry/project-registry';
+@@ -429,6 +430,20 @@ program
+       if (isInitialized(projectPath)) {
+         clack.log.warn(`Already initialized in ${projectPath}`);
+         clack.log.info('Use "codegraph index" to re-index or "codegraph sync" to update');
++        if (isUnityMode()) {
++          writeUnityMarker(projectPath);
++          try {
++            upsertProject(projectPath);
++            const { installUnityAgentSkills, writeAgentRules } = await import('../registry/agent-rules');
++            writeAgentRules(projectPath, {
++              name: path.basename(projectPath),
++              files: 0,
++              nodes: 0,
++              edges: 0,
++            });
++            installUnityAgentSkills(projectPath);
++          } catch { /* non-fatal */ }
++        }
+         try {
+           const { offerWatchFallback } = await import('../installer');
+           await offerWatchFallback(clack, projectPath);
+@@ -460,6 +475,20 @@ program
+       }
+       printIndexResult(clack, result, projectPath);
+ 
++      if (isUnityMode()) {
++        try {
++          upsertProject(projectPath);
++          const { installUnityAgentSkills, writeAgentRules } = await import('../registry/agent-rules');
++          writeAgentRules(projectPath, {
++            name: path.basename(projectPath),
++            files: result.filesIndexed,
++            nodes: result.nodesCreated,
++            edges: result.edgesCreated,
++          });
++          installUnityAgentSkills(projectPath);
++        } catch { /* non-fatal */ }
++      }
++
+       try {
+         const { offerWatchFallback } = await import('../installer');
+         await offerWatchFallback(clack, projectPath);
+@@ -511,6 +540,14 @@ program
+       const cg = CodeGraph.openSync(projectPath);
+       cg.uninitialize();
+ 
++      try {
++        const { removeProject } = await import('../registry/project-registry');
++        removeProject(projectPath);
++        const { removeAgentRules, removeUnityAgentSkills } = await import('../registry/agent-rules');
++        removeAgentRules(projectPath);
++        removeUnityAgentSkills(projectPath);
++      } catch { /* non-fatal */ }
++
+       // Clean up any git sync hooks we installed (no-op if none / not a repo).
+       try {
+         const { removeGitSyncHook } = await import('../sync/git-hooks');

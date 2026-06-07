@@ -13,6 +13,12 @@ import * as path from 'path';
 const START = '<!-- codegraph:start -->';
 const END = '<!-- codegraph:end -->';
 const RULE_FILES = ['AGENTS.md', 'CLAUDE.md'];
+const SKILL_FILES = [
+  'codegraph-unity-exploring',
+  'codegraph-unity-guide',
+  'codegraph-unity-impact',
+  'codegraph-unity-refactoring',
+];
 
 export interface RuleStats {
   name: string;
@@ -25,75 +31,53 @@ function fmt(n: number): string {
   return n.toLocaleString('en-US');
 }
 
+const FALLBACK_TEMPLATE = `# CodeGraph Unity - Project Instructions
+
+This Unity project is indexed by **CodeGraph** as **{{projectName}}** ({{nodes}} symbols, {{edges}} relationships across {{files}} files).
+
+Use CodeGraph before scanning files manually. Run \`codegraph unity index\` if the index is stale.
+
+## Local Unity Skills
+
+- \`codegraph-unity-guide\`
+- \`codegraph-unity-exploring\`
+- \`codegraph-unity-impact\`
+- \`codegraph-unity-refactoring\`
+`;
+
+function candidateInstructionFiles(): string[] {
+  const envPath = process.env.CODEGRAPH_UNITY_INSTRUCTION_FILE;
+  return [
+    envPath,
+    path.resolve(__dirname, '..', '..', '..', 'custom', 'instructions', 'codegraph-unity.md'),
+    path.resolve(__dirname, '..', '..', 'custom', 'instructions', 'codegraph-unity.md'),
+    path.resolve(process.cwd(), 'custom', 'instructions', 'codegraph-unity.md'),
+    path.resolve(process.cwd(), '..', 'custom', 'instructions', 'codegraph-unity.md'),
+  ].filter((file): file is string => !!file);
+}
+
+function readInstructionTemplate(): string {
+  for (const file of candidateInstructionFiles()) {
+    try {
+      if (fs.existsSync(file)) return fs.readFileSync(file, 'utf8');
+    } catch {
+      /* try next candidate */
+    }
+  }
+  return FALLBACK_TEMPLATE;
+}
+
+function applyTemplate(template: string, s: RuleStats): string {
+  return template
+    .replaceAll('{{projectName}}', s.name)
+    .replaceAll('{{files}}', fmt(s.files))
+    .replaceAll('{{nodes}}', fmt(s.nodes))
+    .replaceAll('{{edges}}', fmt(s.edges));
+}
+
 function renderBlock(s: RuleStats): string {
-  return `${START}
-# CodeGraph — Code Intelligence
-
-This project is indexed by **CodeGraph** as **${s.name}** (${fmt(s.nodes)} symbols, ${fmt(s.edges)} relationships across ${fmt(s.files)} files). Use the CodeGraph MCP tools to understand code, assess impact, and navigate — before reaching for grep/read.
-
-> If a CodeGraph tool reports the index is stale, run \`codegraph sync\` (or \`codegraph index\`) in the terminal first. Unity projects: \`codegraph unity index\`.
-
-## Always Do
-
-- **Assess impact before editing a symbol.** Before changing a function, class, or method, run \`codegraph_impact\` on it (CLI: \`codegraph impact <Symbol>\`) and report the blast radius (direct dependents + risk) to the user.
-- **Answer structural questions with CodeGraph, not grep.** For "where is X", "what calls Y", "how does X reach Y", use the tools below — they read a prebuilt index and are far cheaper than scanning files.
-- For a 360° view of one symbol (callers, callees, source), use \`codegraph_context\` (CLI: \`codegraph context "<symbol or task>"\`).
-- For a flow / "how does X reach Y", use \`codegraph_trace\` — one call returns the whole call path.
-
-## When Debugging
-
-1. \`codegraph_search\` the error or symptom to locate the relevant symbols.
-2. \`codegraph_context\` on the suspect function — see every caller and callee.
-3. \`codegraph_trace\` from the entry point to the failing symbol to follow the flow.
-
-## When Refactoring
-
-- CodeGraph has **no automated rename**. Before renaming/moving a symbol, run \`codegraph_impact\` + \`codegraph_callers\` to enumerate every dependent, then update them yourself.
-- After moving code, re-run \`codegraph_callers\` / \`codegraph_impact\` to confirm nothing was missed.
-
-## Never Do
-
-- NEVER edit a function, class, or method without first checking \`codegraph_impact\` on it.
-- NEVER reconstruct a call path by grepping when \`codegraph_trace\` / \`codegraph_callers\` answers it directly.
-- NEVER find-and-replace a rename across files without first enumerating callers via the graph.
-
-## Tools Quick Reference
-
-| Tool | When to use | CLI equivalent |
-|------|-------------|----------------|
-| \`codegraph_search\` | Find a symbol by name | \`codegraph query "<name>"\` |
-| \`codegraph_context\` | 360° view of one symbol / area | \`codegraph context "<task>"\` |
-| \`codegraph_callers\` | Who calls this | \`codegraph callers "<Symbol>"\` |
-| \`codegraph_callees\` | What this calls | \`codegraph callees "<Symbol>"\` |
-| \`codegraph_impact\` | Blast radius before editing | \`codegraph impact "<Symbol>"\` |
-| \`codegraph_trace\` | Whole call path X → Y | — |
-| \`codegraph_explore\` | Survey several related symbols' source | — |
-| \`codegraph_files\` | What's in a directory | \`codegraph files\` |
-| \`codegraph_status\` | Index size / freshness | \`codegraph status\` |
-
-## Impact Depth Levels
-
-| Depth | Meaning | Action |
-|-------|---------|--------|
-| d=1 | WILL BREAK — direct callers/importers | MUST update these |
-| d=2 | LIKELY AFFECTED — indirect dependents | Should test |
-| d=3 | MAY NEED TESTING — transitive | Test if on a critical path |
-
-## Self-Check Before Finishing
-
-1. \`codegraph_impact\` was run for every modified symbol.
-2. All d=1 (WILL BREAK) dependents were updated.
-3. Structural questions were answered via CodeGraph, not blind grep.
-
-## Keeping the Index Fresh
-
-The file watcher auto-syncs the graph as you edit. To force a refresh after large changes:
-
-\`\`\`bash
-codegraph sync        # incremental
-codegraph index       # full re-index (Unity: codegraph unity index)
-\`\`\`
-${END}`;
+  const body = applyTemplate(readInstructionTemplate(), s).trim();
+  return `${START}\n${body}\n${END}`;
 }
 
 /** Write/refresh the CodeGraph rule block into AGENTS.md and CLAUDE.md. */
@@ -112,6 +96,69 @@ export function writeAgentRules(projectRoot: string, stats: RuleStats): void {
       content = `${block}\n`;
     }
     try { fs.writeFileSync(fp, content); } catch { /* non-fatal */ }
+  }
+}
+
+function candidateSkillRoots(): string[] {
+  const roots = [
+    process.env.CODEGRAPH_UNITY_SKILLS_DIR,
+    path.resolve(__dirname, '..', '..', '..', 'custom', 'skills'),
+    path.resolve(__dirname, '..', '..', 'custom', 'skills'),
+    path.resolve(process.cwd(), 'custom', 'skills'),
+    path.resolve(process.cwd(), '..', 'custom', 'skills'),
+  ];
+  return roots.filter((root): root is string => !!root);
+}
+
+function findUnitySkillsRoot(): string | undefined {
+  for (const root of candidateSkillRoots()) {
+    try {
+      if (fs.existsSync(root) && fs.statSync(root).isDirectory()) return root;
+    } catch {
+      /* try next candidate */
+    }
+  }
+  return undefined;
+}
+
+function localSkillTargets(projectRoot: string): string[] {
+  return [
+    path.join(projectRoot, '.agents', 'skills'),
+    path.join(projectRoot, '.claude', 'skills'),
+  ];
+}
+
+/** Install Unity CodeGraph skills into the indexed project, not global agent dirs. */
+export function installUnityAgentSkills(projectRoot: string): void {
+  const sourceRoot = findUnitySkillsRoot();
+  if (!sourceRoot) return;
+
+  for (const targetRoot of localSkillTargets(projectRoot)) {
+    for (const skillName of SKILL_FILES) {
+      const source = path.join(sourceRoot, skillName, 'SKILL.md');
+      const targetDir = path.join(targetRoot, skillName);
+      const target = path.join(targetDir, 'SKILL.md');
+      try {
+        if (!fs.existsSync(source)) continue;
+        fs.mkdirSync(targetDir, { recursive: true });
+        fs.copyFileSync(source, target);
+      } catch {
+        /* non-fatal */
+      }
+    }
+  }
+}
+
+/** Remove the Unity CodeGraph skills installed by this overlay. */
+export function removeUnityAgentSkills(projectRoot: string): void {
+  for (const targetRoot of localSkillTargets(projectRoot)) {
+    for (const skillName of SKILL_FILES) {
+      try {
+        fs.rmSync(path.join(targetRoot, skillName), { recursive: true, force: true });
+      } catch {
+        /* non-fatal */
+      }
+    }
   }
 }
 

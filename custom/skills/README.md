@@ -16,17 +16,19 @@ skills/
     SKILL.md
 ```
 
-## Triển khai thủ công
+## Triển khai
 
-Copy thư mục của từng skill vào thư mục lưu trữ kỹ năng của agent bạn đang sử dụng:
+`codegraph unity init` tự động copy các skill này vào project Unity đang được
+index:
 
-- **Gemini / Antigravity**: `~/.gemini/config/skills/`
-- **Claude Code**: `~/.claude/skills/`
-- **Codex**: `~/.codex/skills/`
+- `.agents/skills/<skill-name>/SKILL.md`
+- `.claude/skills/<skill-name>/SKILL.md`
 
-Ví dụ đối với Antigravity:
+Các skill được cài theo từng repo để agent mở đúng project sẽ nhận đúng hướng
+dẫn Unity CodeGraph mà không làm thay đổi global profile của người dùng.
+
+Nếu cần override nguồn skill khi debug CLI, đặt biến môi trường:
+
 ```bash
-cp -r custom/skills/codegraph-unity-* ~/.gemini/config/skills/
+CODEGRAPH_UNITY_SKILLS_DIR=/path/to/custom/skills codegraph unity init
 ```
-
-Installer có thể tự động hóa bước này trong tương lai, hiện tại các skill được giữ độc lập và chuẩn hóa để đảm bảo khả năng tương thích cao nhất.

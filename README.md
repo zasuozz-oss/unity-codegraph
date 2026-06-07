@@ -20,8 +20,8 @@ metadata, so this wrapper remains the only Git repo in the folder.
   in `~/.codegraph/projects.json`; `web/` is a React + sigma.js graph dashboard
   that lists all registered projects, lets you pick/switch (dropdown) between them,
   and delete them. Launch with `./dashboard.sh`.
-- **Unity agent skills** — `custom/skills/*.md`, installed into Claude / Gemini /
-  Codex skill dirs.
+- **Unity agent skills** — `custom/skills/*/SKILL.md`, installed into each Unity
+  project by `codegraph unity init` under `.agents/skills/` and `.claude/skills/`.
 
 > Note: the older Unity **asset extractor** + **GUID/fileID resolver**
 > (`unity-asset-extractor.ts`, `unity-yaml.ts`, `frameworks/unity.ts`) are retained
@@ -77,8 +77,10 @@ codegraph init            # upstream behavior on any codebase
 
 Both register the project in the dashboard registry. `unity init` also drops a
 `.codegraph/unity` marker, so later `codegraph sync` / `codegraph serve --mcp` stay
-Unity-aware. MCP is wired to this **local** build (Unity-enabled) — not the npm
-release, which has no Unity support.
+Unity-aware. It also writes a CodeGraph instruction block into `AGENTS.md` and
+`CLAUDE.md`, plus project-local Unity skills under `.agents/skills/` and
+`.claude/skills/`. MCP is wired to this **local** build (Unity-enabled) — not the
+npm release, which has no Unity support.
 
 ## Dashboard
 
