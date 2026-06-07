@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # ══════════════════════════════════════════════════════════════
-# unity-codegraph — update / re-apply the Unity overlay
+# unity-codegraph — refresh / re-apply the Unity overlay
 #
-# Keeps upstream colbymchenry/codegraph pristine in ./codegraph and re-applies
-# the Unity custom overlay (new files + patches) on top. Never edits upstream
-# source by hand, so `git pull upstream` never conflicts on our account.
+# Refreshes upstream colbymchenry/codegraph into ./codegraph and re-applies the
+# Unity custom overlay (new files + patches) on top. The generated source tree is
+# left without nested Git metadata so the wrapper repo remains the only Git repo.
 #
-#   ./update.sh                     pull upstream, re-apply overlay, rebuild
-#   ./update.sh --apply-custom-only just (re)apply the overlay (no pull/build)
+#   ./update.sh                     refresh upstream, re-apply overlay, rebuild
+#   ./update.sh --apply-custom-only just (re)apply the overlay (no refresh/build)
 # ══════════════════════════════════════════════════════════════
 set -euo pipefail
 
@@ -19,16 +19,24 @@ err()  { echo -e "${RED}[ERROR]${NC} $*"; }
 step() { echo -e "\n${CYAN}── $* ──${NC}"; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+UPSTREAM_SLUG="colbymchenry/codegraph"
+UPSTREAM_REPO="https://github.com/${UPSTREAM_SLUG}.git"
 UPSTREAM_DIR="$SCRIPT_DIR/codegraph"
 CUSTOM_DIR="$SCRIPT_DIR/custom"
 PATCH_DIR="$CUSTOM_DIR/patches"
 NEW_DIR="$CUSTOM_DIR/new"
 
-require_clone() {
-  if [ ! -d "$UPSTREAM_DIR/.git" ]; then
-    err "Upstream clone not found at $UPSTREAM_DIR — run ./setup.sh first."
+require_source() {
+  if [ ! -f "$UPSTREAM_DIR/package.json" ]; then
+    err "Upstream source not found at $UPSTREAM_DIR — run ./setup.sh first."
     exit 1
   fi
+}
+
+remove_nested_git_metadata() {
+  [ -d "$UPSTREAM_DIR/.git" ] || return 0
+  rm -rf "$UPSTREAM_DIR/.git"
+  ok "Removed nested Git metadata from codegraph/"
 }
 
 # ── Copy drop-in new files (paths under custom/new mirror the upstream tree) ──
@@ -49,6 +57,8 @@ copy_new_files() {
 apply_patches() {
   [ -d "$PATCH_DIR" ] || return 0
   local applied=0 failed=0 p
+  local has_git=0
+  [ -d "$UPSTREAM_DIR/.git" ] && has_git=1
   shopt -s nullglob
   for p in "$PATCH_DIR"/*.patch; do
     [ -s "$p" ] || continue
@@ -57,7 +67,7 @@ apply_patches() {
       git -C "$UPSTREAM_DIR" apply --whitespace=nowarn "$p"
       ok "Applied $name"
       applied=$((applied + 1))
-    elif git -C "$UPSTREAM_DIR" apply --check --3way "$p" >/dev/null 2>&1; then
+    elif [ "$has_git" -eq 1 ] && git -C "$UPSTREAM_DIR" apply --check --3way "$p" >/dev/null 2>&1; then
       git -C "$UPSTREAM_DIR" apply --3way --whitespace=nowarn "$p"
       ok "Applied $name (3-way)"
       applied=$((applied + 1))
@@ -75,29 +85,33 @@ apply_patches() {
 }
 
 apply_custom_only() {
-  require_clone
-  step "Applying Unity overlay onto upstream clone"
+  require_source
+  step "Applying Unity overlay onto upstream source"
   # The clone must differ from upstream ONLY by our overlay, so revert any
   # previously-applied patch hunks (tracked files) back to pristine HEAD first.
   # This makes re-applying idempotent — patches always land on a clean base
   # instead of failing because they're already (partially) applied. Untracked
   # overlay files are simply overwritten by copy_new_files next.
-  git -C "$UPSTREAM_DIR" checkout -- . 2>/dev/null || true
+  if [ -d "$UPSTREAM_DIR/.git" ]; then
+    git -C "$UPSTREAM_DIR" checkout -- . 2>/dev/null || true
+  fi
   copy_new_files
   apply_patches
 }
 
-pull_upstream() {
-  require_clone
-  step "Pulling upstream codegraph (resetting to a pristine base first)"
-  # Reset tracked files to pristine upstream so our patches always apply to a
-  # clean base. Untracked overlay files (custom/new copies) are re-copied next.
-  git -C "$UPSTREAM_DIR" fetch upstream --tags 2>/dev/null \
-    || git -C "$UPSTREAM_DIR" fetch origin --tags
-  local base
-  base="$(git -C "$UPSTREAM_DIR" rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null || echo "origin/main")"
-  git -C "$UPSTREAM_DIR" reset --hard "$base"
-  ok "Upstream reset to $base ($(git -C "$UPSTREAM_DIR" rev-parse --short HEAD))"
+refresh_upstream() {
+  step "Refreshing upstream codegraph"
+  local tmp
+  tmp="$(mktemp -d "$SCRIPT_DIR/.codegraph-fetch.XXXXXX")"
+  if git clone --depth 1 "$UPSTREAM_REPO" "$tmp"; then
+    rm -rf "$UPSTREAM_DIR"
+    mv "$tmp" "$UPSTREAM_DIR"
+    ok "Fetched fresh $UPSTREAM_SLUG → codegraph/"
+  else
+    rm -rf "$tmp"
+    err "Could not fetch $UPSTREAM_REPO"
+    exit 1
+  fi
 }
 
 rebuild() {
@@ -107,18 +121,19 @@ rebuild() {
 }
 
 main() {
-  pull_upstream
+  refresh_upstream
   apply_custom_only
+  remove_nested_git_metadata
   rebuild
   echo ""; ok "Update complete. Restart your agent to reload."
 }
 
 case "${1:-}" in
-  --apply-custom-only) apply_custom_only ;;
+  --apply-custom-only) apply_custom_only; remove_nested_git_metadata ;;
   --help|-h)
     echo "Usage: ./update.sh [--apply-custom-only]"
-    echo "  (no args)            pull upstream, re-apply overlay, rebuild"
-    echo "  --apply-custom-only  re-apply overlay only (no pull/build)" ;;
+    echo "  (no args)            refresh upstream, re-apply overlay, rebuild"
+    echo "  --apply-custom-only  re-apply overlay only (no refresh/build)" ;;
   "") main ;;
   *) err "Unknown option: $1"; exit 1 ;;
 esac

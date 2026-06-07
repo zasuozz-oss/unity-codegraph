@@ -23,12 +23,12 @@ export function enableUnityMode(): void {
 
 /** True when the current process should extract Unity assets, not just C#. */
 export function isUnityAssetMode(): boolean {
-  return process.env.CODEGRAPH_UNITY_ASSETS === '1';
+  return false;
 }
 
-/** Force full-asset mode on for this process. Asset mode implies base Unity mode. */
+/** Legacy no-op: asset mode is disabled, but the Unity wrapper still enables C# mode. */
 export function enableUnityAssetMode(): void {
-  process.env.CODEGRAPH_UNITY_ASSETS = '1';
+  delete process.env.CODEGRAPH_UNITY_ASSETS;
   enableUnityMode();
 }
 
@@ -49,13 +49,9 @@ export function writeUnityMarker(projectRoot: string): void {
   }
 }
 
-/** Persist the per-project full-asset Unity marker. */
+/** Legacy no-op: persist only the base Unity marker so future runs stay C#-only. */
 export function writeUnityAssetMarker(projectRoot: string): void {
-  try {
-    fs.writeFileSync(assetMarkerPath(projectRoot), 'Unity full-asset extraction enabled.\n');
-  } catch {
-    /* non-fatal: the env var still drives this run */
-  }
+  writeUnityMarker(projectRoot);
 }
 
 /** Whether this project was initialized in Unity mode. */
@@ -68,12 +64,8 @@ export function hasUnityMarker(projectRoot: string): boolean {
 }
 
 /** Whether this project was initialized in full-asset Unity mode. */
-export function hasUnityAssetMarker(projectRoot: string): boolean {
-  try {
-    return fs.existsSync(assetMarkerPath(projectRoot));
-  } catch {
-    return false;
-  }
+export function hasUnityAssetMarker(_projectRoot: string): boolean {
+  return false;
 }
 
 /** If the project carries the Unity marker, enable Unity mode for this process. */
@@ -81,7 +73,11 @@ export function enableUnityModeIfMarked(projectRoot: string): void {
   if (hasUnityMarker(projectRoot)) enableUnityMode();
 }
 
-/** If the project carries the full-asset marker, enable full-asset mode. */
+/** If a legacy full-asset marker exists, downgrade it to base Unity C# mode. */
 export function enableUnityAssetModeIfMarked(projectRoot: string): void {
-  if (hasUnityAssetMarker(projectRoot)) enableUnityAssetMode();
+  try {
+    if (fs.existsSync(assetMarkerPath(projectRoot))) enableUnityMode();
+  } catch {
+    /* non-fatal: the base marker still drives normal Unity mode */
+  }
 }

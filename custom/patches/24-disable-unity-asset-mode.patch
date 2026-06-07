@@ -1,0 +1,72 @@
+diff --git a/src/bin/codegraph.ts b/src/bin/codegraph.ts
+--- a/src/bin/codegraph.ts
++++ b/src/bin/codegraph.ts
+@@ -31,7 +31,5 @@ import { relaunchWithWasmRuntimeFlagsIfNeeded } from '../extraction/wasm-runtime
+ import {
+   enableUnityMode,
+   writeUnityMarker,
+-  enableUnityAssetMode,
+-  writeUnityAssetMarker,
+ } from '../extraction/unity-mode';
+ import { upsertProject } from '../registry/project-registry';
+@@ -1431,12 +1429,12 @@ program
+  * codegraph unity <command> [args...]
+  *
+  * Thin Unity-mode wrapper. It re-dispatches into the normal command tree after
+- * enabling Unity mode for this process. Passing --assets enables full-asset
+- * extraction and strips that flag before the upstream command parser sees it.
++ * enabling Unity C# mode for this process. The legacy --assets flag is stripped
++ * before the upstream command parser sees it, but asset extraction stays off.
+  */
+ program
+   .command('unity [command...]')
+-  .description('Run any codegraph command with Unity extraction enabled (add --assets for prefab/scene/asset graph)')
++  .description('Run any codegraph command with Unity C# extraction enabled')
+   .allowUnknownOption(true)
+   .allowExcessArguments(true)
+   .helpOption(false)
+@@ -1447,12 +1445,7 @@ program
+     const unityIdx = process.argv.indexOf('unity');
+     const forwarded = unityIdx >= 0 ? process.argv.slice(unityIdx + 1) : (commandArgs || []);
+-    const wantAssets = forwarded.includes('--assets');
+     const strippedForwarded = forwarded.filter((a) => a !== '--assets');
+ 
+-    if (wantAssets) {
+-      enableUnityAssetMode();
+-    } else {
+-      enableUnityMode();
+-    }
++    enableUnityMode();
+ 
+     if (strippedForwarded.length === 0) {
+@@ -1471,7 +1464,6 @@ program
+       const projectPath = path.resolve(pathArg || process.cwd());
+       process.once('exit', () => {
+         if (!isInitialized(projectPath)) return;
+-        if (wantAssets) writeUnityAssetMarker(projectPath);
+-        else writeUnityMarker(projectPath);
++        writeUnityMarker(projectPath);
+         try {
+           upsertProject(projectPath);
+diff --git a/src/extraction/grammars.ts b/src/extraction/grammars.ts
+--- a/src/extraction/grammars.ts
++++ b/src/extraction/grammars.ts
+@@ -9,6 +9,6 @@ import * as path from 'path';
+ import { Parser, Language as WasmLanguage } from 'web-tree-sitter';
+ import { Language } from '../types';
+-import { isUnityAssetMode, isUnityMode } from './unity-mode';
++import { isUnityAssetMode } from './unity-mode';
+ import { UNITY_ASSET_EXTENSIONS, UNITY_ASSET_NODE_EXTENSIONS } from './unity-preset';
+ 
+ export type GrammarLanguage = Exclude<Language, 'svelte' | 'vue' | 'liquid' | 'razor' | 'yaml' | 'twig' | 'xml' | 'properties' | 'unity_asset' | 'unity_asmdef' | 'unknown'>;
+@@ -258,7 +258,7 @@ export function detectLanguage(filePath: string, source?: string): Language {
+   if (isPlayRoutesFile(filePath)) return 'yaml';
+   const ext = filePath.substring(filePath.lastIndexOf('.')).toLowerCase();
+   if (UNITY_ASSET_EXTENSIONS.has(ext)) {
+-    if (!isUnityMode()) return 'unknown';
++    if (!isUnityAssetMode()) return 'unknown';
+     if (ext === '.asmdef') return 'unity_asmdef';
+-    if (isUnityAssetMode() && UNITY_ASSET_NODE_EXTENSIONS.has(ext)) return 'unity_asset';
++    if (UNITY_ASSET_NODE_EXTENSIONS.has(ext)) return 'unity_asset';
+     return 'unknown';
+   }

@@ -19,7 +19,7 @@ export default function App() {
   const [selected, setSelected] = useState<GraphNode | null>(null);
   const [detail, setDetail] = useState<NodeDetail | null>(null);
   const [visibleEdgeTypes, setVisibleEdgeTypes] = useState<EdgeType[]>(DEFAULT_VISIBLE_EDGES);
-  const [visibleLabels] = useState<NodeLabel[]>(DEFAULT_VISIBLE_LABELS);
+  const [visibleLabels, setVisibleLabels] = useState<NodeLabel[]>(DEFAULT_VISIBLE_LABELS);
 
   const loadProjects = useCallback(() => {
     fetchProjects().then(setProjects).catch((e) => setError(String(e)));
@@ -70,6 +70,11 @@ export default function App() {
   const toggleEdge = (t: EdgeType) =>
     setVisibleEdgeTypes((prev) =>
       prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t],
+    );
+
+  const toggleLabel = (label: NodeLabel) =>
+    setVisibleLabels((prev) =>
+      prev.includes(label) ? prev.filter((x) => x !== label) : [...prev, label],
     );
 
   // --- Landing view ---
@@ -124,6 +129,22 @@ export default function App() {
             ))}
         </div>
       </header>
+
+      <div className="edge-bar">
+        {[...labelCounts.entries()]
+          .sort((a, b) => b[1] - a[1])
+          .map(([label, n]) => (
+            <button
+              key={label}
+              className={`node-toggle ${visibleLabels.includes(label as NodeLabel) ? 'on' : ''}`}
+              style={{ borderColor: NODE_COLORS[label as NodeLabel] ?? NODE_COLORS.CodeElement }}
+              onClick={() => toggleLabel(label as NodeLabel)}
+            >
+              <span className="swatch" style={{ background: NODE_COLORS[label as NodeLabel] ?? NODE_COLORS.CodeElement }} />
+              {label} <span className="muted">{n}</span>
+            </button>
+          ))}
+      </div>
 
       <div className="edge-bar">
         {ALL_EDGE_TYPES.map((t) => (

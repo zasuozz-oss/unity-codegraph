@@ -1,0 +1,12 @@
+diff --git a/src/types.ts b/src/types.ts
+--- a/src/types.ts
++++ b/src/types.ts
+@@ -92,6 +92,8 @@ export const LANGUAGES = [
+   'twig',
+   'xml',
+   'properties',
++  'unity_asset',
++  'unity_asmdef',
+   'unknown',
+ ] as const;
+ 

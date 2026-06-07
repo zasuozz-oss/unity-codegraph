@@ -1,0 +1,244 @@
+diff --git a/src/extraction/index.ts b/src/extraction/index.ts
+--- a/src/extraction/index.ts
++++ b/src/extraction/index.ts
+@@ -23,5 +23,6 @@ import { isUnityAssetMode, isUnityMode } from './unity-mode';
+ import { UNITY_ALL_IGNORE_DIRS, UNITY_ASSET_MODE_IGNORE_DIRS } from './unity-preset';
+ import type { UnityAssetExtractionResult } from './unity/unity-asset-extractor';
++import { generateUnityNodeId } from './unity/unity-node-id';
+ import { RawUnityEdge, resolveUnityEdges } from '../resolution/unity/unity-reference-resolver';
+ import { generateNodeId } from './tree-sitter-helpers';
+ import { logDebug, logWarn } from '../errors';
+@@ -523,10 +524,13 @@ function makeUnitySubAssetNode(
+   filePath: string,
+   kind: Node['kind'],
+   name: string,
+-  fileId: string
++  fileId: string,
++  assetGuid?: string
+ ): Node {
+   return {
+-    id: generateNodeId(filePath, kind, name, 1),
++    id: assetGuid
++      ? generateUnityNodeId(assetGuid, kind, fileId)
++      : generateNodeId(filePath, kind, name, 1),
+     kind,
+     name,
+     qualifiedName: `${filePath}::${fileId}`,
+@@ -541,6 +545,38 @@ function makeUnitySubAssetNode(
+     updatedAt: Date.now(),
+   };
+ }
++
++function stabilizeUnityExtractionResult(
++  result: UnityAssetExtractionResult,
++  assetGuid: string
++): UnityAssetExtractionResult {
++  const remappedIds = new Map<string, string>();
++  const nodes = result.nodes.map((node) => {
++    const marker = node.qualifiedName.lastIndexOf('::');
++    if (marker < 0) return node;
++    const localFileId = node.qualifiedName.slice(marker + 2);
++    const id = generateUnityNodeId(assetGuid, node.kind, localFileId);
++    remappedIds.set(node.id, id);
++    return { ...node, id };
++  });
++  const remap = (id: string | undefined): string | undefined =>
++    id ? remappedIds.get(id) ?? id : undefined;
++
++  return {
++    ...result,
++    nodes,
++    edges: result.edges.map((edge) => ({
++      ...edge,
++      source: remap(edge.source)!,
++      target: remap(edge.target)!,
++    })),
++    unityRawEdges: result.unityRawEdges.map((edge) => ({
++      ...edge,
++      source: remap(edge.source),
++      target: remap(edge.target),
++    })),
++  };
++}
+ 
+ /**
+  * Extraction orchestrator
+@@ -636,11 +672,12 @@ export class ExtractionOrchestrator {
+   private resolveUnityAssetEdges(): number {
+     if (!isUnityAssetMode()) return 0;
+ 
+-    this.queries.buildUnityGuidIndex(this.rootDir);
+     const guidRows = this.queries.getUnityGuidRows();
+     const spriteNodes = guidRows
+       .filter((row) => row.assetType === 'sprite' && row.name && row.fileId !== '0')
+-      .map((row) => makeUnitySubAssetNode(row.assetPath, 'unity_sprite', row.name!, row.fileId));
++      .map((row) =>
++        makeUnitySubAssetNode(row.assetPath, 'unity_sprite', row.name!, row.fileId, row.guid)
++      );
+     if (spriteNodes.length > 0) this.queries.insertNodes(spriteNodes);
+     const spriteContainmentEdges: Edge[] = [];
+ 
+@@ -647,6 +684,6 @@ export class ExtractionOrchestrator {
+     const guidToNodeId = new Map<string, string>();
+     const guidFileIdToNodeId = new Map<string, string>();
+-    const methodTargetsByGuid = new Map<string, Map<string, string>>();
++    const methodTargetsByGuid = new Map<string, Map<string, Node[]>>();
+ 
+     for (const row of guidRows) {
+       if (row.assetType === 'script') {
+@@ -661,9 +698,12 @@ export class ExtractionOrchestrator {
+           guidToNodeId.set(row.guid, classNode.id);
+           guidFileIdToNodeId.set(`${row.guid}:${row.fileId}`, classNode.id);
+         }
+-        const methods = new Map<string, string>();
++        const methods = new Map<string, Node[]>();
+         for (const node of nodes) {
+-          if (node.kind === 'method') methods.set(node.name, node.id);
++          if (node.kind !== 'method') continue;
++          const overloads = methods.get(node.name) ?? [];
++          overloads.push(node);
++          methods.set(node.name, overloads);
+         }
+         if (methods.size > 0) methodTargetsByGuid.set(row.guid, methods);
+         continue;
+@@ -671,7 +711,13 @@ export class ExtractionOrchestrator {
+       }
+ 
+       if (row.assetType === 'sprite' && row.name && row.fileId !== '0') {
+-        const spriteNode = makeUnitySubAssetNode(row.assetPath, 'unity_sprite', row.name, row.fileId);
++        const spriteNode = makeUnitySubAssetNode(
++          row.assetPath,
++          'unity_sprite',
++          row.name,
++          row.fileId,
++          row.guid
++        );
+         const imageNode = this.queries
+           .getNodesByFile(row.assetPath)
+           .find((node) => node.kind === 'unity_image');
+@@ -731,20 +777,71 @@ export class ExtractionOrchestrator {
+       }
+       anchors.set(fileId, node.id);
+     }
++    const assetGuidByPath = new Map(
++      guidRows
++        .filter((row) => row.fileId === '0')
++        .map((row) => [row.assetPath, row.guid] as const)
++    );
++    for (const [filePath, anchors] of localAnchorsByFile) {
++      const assetGuid = assetGuidByPath.get(filePath);
++      if (!assetGuid) continue;
++      for (const [fileId, nodeId] of anchors) {
++        guidFileIdToNodeId.set(`${assetGuid}:${fileId}`, nodeId);
++      }
++    }
++    const componentScriptGuidByNode = new Map<string, string>();
++    for (const edge of this.unityRawEdges) {
++      const metadata = (edge.metadata ?? {}) as Record<string, unknown>;
++      if (
++        metadata.unityRelation === 'component_uses_script' &&
++        edge.source &&
++        typeof metadata.guid === 'string'
++      ) {
++        componentScriptGuidByNode.set(edge.source, metadata.guid);
++      }
++    }
+ 
+     const { resolved, placeholderNodes } = resolveUnityEdges(
+       this.unityRawEdges,
+       guidToNodeId,
+       guidFileIdToNodeId,
+       localAnchorsByFile,
+-      methodTargetsByGuid
++      methodTargetsByGuid,
++      componentScriptGuidByNode
+     );
++    this.enrichUnityComponentNames(componentScriptGuidByNode, guidToNodeId);
+     if (placeholderNodes.length > 0) this.queries.insertNodes(placeholderNodes);
+     if (spriteContainmentEdges.length > 0) this.queries.insertEdges(spriteContainmentEdges);
+     if (resolved.length > 0) this.queries.insertEdges(resolved);
+     this.unityRawEdges = [];
+     return resolved.length + spriteContainmentEdges.length;
+   }
++
++  private enrichUnityComponentNames(
++    componentScriptGuidByNode: Map<string, string>,
++    guidToNodeId: Map<string, string>
++  ): void {
++    for (const [componentId, scriptGuid] of componentScriptGuidByNode) {
++      const component = this.queries.getNodeById(componentId);
++      const scriptClassId = guidToNodeId.get(scriptGuid);
++      const scriptClass = scriptClassId
++        ? this.queries.getNodeById(scriptClassId)
++        : null;
++      if (!component || !scriptClass) continue;
++
++      const ownerEdge = this.queries
++        .getIncomingEdges(componentId, ['contains'])
++        .find((edge) => edge.metadata?.unityRelation === 'gameobject_has_component');
++      const owner = ownerEdge ? this.queries.getNodeById(ownerEdge.source) : null;
++      const ownerName = owner?.name ?? component.name.split(' / ')[0];
++      if (!ownerName) continue;
++
++      const name = `${ownerName} / ${scriptClass.name}`;
++      if (component.name !== name) {
++        this.queries.updateNode({ ...component, name, updatedAt: Date.now() });
++      }
++    }
++  }
+ 
+   /**
+    * Index all files in the project
+@@ -764,6 +863,18 @@ export class ExtractionOrchestrator {
+     let totalEdges = 0;
+     this.unityRawEdges = [];
+ 
++    if (isUnityAssetMode()) {
++      this.queries.buildUnityGuidIndex(this.rootDir);
++    }
++    const unityGuidByAssetPath = new Map(
++      isUnityAssetMode()
++        ? this.queries
++            .getUnityGuidRows()
++            .filter((row) => row.fileId === '0')
++            .map((row) => [row.assetPath, row.guid] as const)
++        : []
++    );
++
+     const log = verbose
+       ? (msg: string) => { console.log(`[worker] ${msg}`); }
+       : (_msg: string) => {};
+@@ -1091,6 +1201,13 @@ export class ExtractionOrchestrator {
+         let result: ExtractionResult;
+         if (language === 'unity_asset' || language === 'unity_asmdef') {
+           result = extractFromSource(filePath, content, language, frameworkNames);
++          const assetGuid = unityGuidByAssetPath.get(filePath);
++          if (language === 'unity_asset' && assetGuid) {
++            result = stabilizeUnityExtractionResult(
++              result as UnityAssetExtractionResult,
++              assetGuid
++            );
++          }
+         } else {
+           // Parse in worker thread (main thread stays unblocked).
+           // Wrapped in try/catch to handle worker timeouts and crashes gracefully.
+@@ -1437,7 +1554,18 @@ export class ExtractionOrchestrator {
+     // otherwise detect on the spot so single-file re-index paths still emit
+     // route nodes / middleware / etc.
+     const frameworkNames = this.ensureDetectedFrameworks();
+-    const result = extractFromSource(relativePath, content, language, frameworkNames);
++    let result = extractFromSource(relativePath, content, language, frameworkNames);
++    if (language === 'unity_asset') {
++      const assetGuid = this.queries
++        .getUnityGuidRows()
++        .find((row) => row.assetPath === relativePath && row.fileId === '0')?.guid;
++      if (assetGuid) {
++        result = stabilizeUnityExtractionResult(
++          result as UnityAssetExtractionResult,
++          assetGuid
++        );
++      }
++    }
+ 
+     // Store in database
+     if (result.nodes.length > 0 || result.errors.length === 0) {

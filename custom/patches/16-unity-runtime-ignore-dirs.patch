@@ -1,0 +1,92 @@
+diff --git a/src/extraction/index.ts b/src/extraction/index.ts
+--- a/src/extraction/index.ts
++++ b/src/extraction/index.ts
+@@ -243,8 +243,12 @@ function getGitVisibleFiles(rootDir: string): Set<string> | null {
+  * embedded (nested, non-submodule) git repos. Returns null on failure
+  * (non-git project) so callers can fall back to a filesystem walk.
+  */
+ function getGitVisibleFiles(rootDir: string): Set<string> | null {
+   try {
++    // Full-asset Unity mode must see game assets even when the parent repo
++    // ignores generated test/project folders or assets are managed outside git.
++    if (isUnityAssetMode()) return null;
++
+     // Check if the project directory is gitignored by a parent repo.
+     // When rootDir lives inside a parent git repo that ignores it,
+     // `git ls-files` returns nothing — fall back to filesystem walk.
+@@ -903,30 +907,38 @@ export class ExtractionOrchestrator {
+         // this; the bulk path used to silently skip the check.
+-        if (stats.size > MAX_FILE_SIZE) {
++        // Unity full-asset files are explicit user-requested graph nodes, and
++        // image/text/json assets can exceed 1MB while still needing a node.
++        if (stats.size > MAX_FILE_SIZE && language !== 'unity_asset' && language !== 'unity_asmdef') {
+           processed++;
+           filesSkipped++;
+           errors.push({
+             message: `File exceeds max size (${stats.size} > ${MAX_FILE_SIZE})`,
+             filePath,
+             severity: 'warning',
+             code: 'size_exceeded',
+           });
+           onProgress?.({ phase: 'parsing', current: processed, total });
+           continue;
+         }
+ 
++        // Unity asset extraction is lightweight and depends on Unity mode state;
++        // keep it on the main thread instead of rediscovering mode in the worker.
+         let result: ExtractionResult;
+-        try {
+-          result = await requestParse(filePath, content);
+-        } catch (parseErr) {
+-          processed++;
+-          filesErrored++;
+-          errors.push({
+-            message: parseErr instanceof Error ? parseErr.message : String(parseErr),
+-            filePath,
+-            severity: 'error',
+-            code: 'parse_error',
+-          });
+-          continue;
++        if (language === 'unity_asset' || language === 'unity_asmdef') {
++          result = extractFromSource(filePath, content, language, frameworkNames);
++        } else {
++          try {
++            result = await requestParse(filePath, content);
++          } catch (parseErr) {
++            processed++;
++            filesErrored++;
++            errors.push({
++              message: parseErr instanceof Error ? parseErr.message : String(parseErr),
++              filePath,
++              severity: 'error',
++              code: 'parse_error',
++            });
++            continue;
++          }
+         }
+ 
+         processed++;
+@@ -1221,8 +1234,12 @@ export class ExtractionOrchestrator {
+       };
+     }
+ 
++    // Detect language before size checks so Unity asset indexing can surface
++    // large images/atlases as file-level graph nodes.
++    const language = detectLanguage(relativePath, content);
++
+     // Check file size
+-    if (stats.size > MAX_FILE_SIZE) {
++    if (stats.size > MAX_FILE_SIZE && language !== 'unity_asset' && language !== 'unity_asmdef') {
+       return {
+         nodes: [],
+         edges: [],
+@@ -1238,9 +1254,7 @@ export class ExtractionOrchestrator {
+         durationMs: 0,
+       };
+     }
+ 
+-    // Detect language
+-    const language = detectLanguage(relativePath, content);
+     if (!isLanguageSupported(language)) {
+       return {
+         nodes: [],

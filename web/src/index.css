@@ -85,14 +85,14 @@ body { background: var(--void); color: var(--text); }
   display: flex; gap: 6px; padding: 6px 14px; flex-wrap: wrap;
   border-bottom: 1px solid var(--border); background: #0a0a12;
 }
-.edge-toggle {
+.edge-toggle, .node-toggle {
   display: inline-flex; align-items: center; gap: 5px;
   font: inherit; font-size: 11px; cursor: pointer;
   padding: 3px 8px; border-radius: 6px;
   background: transparent; color: var(--muted);
   border: 1px solid var(--border); opacity: 0.45;
 }
-.edge-toggle.on { opacity: 1; color: var(--text); }
+.edge-toggle.on, .node-toggle.on { opacity: 1; color: var(--text); }
 
 .stage { position: relative; flex: 1; min-height: 0; }
 

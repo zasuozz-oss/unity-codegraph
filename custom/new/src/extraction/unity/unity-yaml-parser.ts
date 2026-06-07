@@ -2,13 +2,13 @@ import { parseDocument } from 'yaml';
 
 export interface UnityDoc {
   classId: number;
-  fileId: number;
+  fileId: string;
   stripped: boolean;
   body: Record<string, any>;
   line: number;
 }
 
-const HEADER_RE = /^--- !u!(\d+) &(\d+)(\s+stripped)?\s*$/;
+const HEADER_RE = /^--- !u!(\d+) &(-?\d+)(\s+stripped)?\s*$/;
 
 /** Cheap guard: Unity text assets start with %YAML or a document marker. */
 export function isUnityTextAsset(content: string): boolean {
@@ -23,7 +23,7 @@ export function parseUnityYaml(content: string): UnityDoc[] {
   const docs: UnityDoc[] = [];
   let cur: {
     classId: number;
-    fileId: number;
+    fileId: string;
     stripped: boolean;
     line: number;
     bodyLines: string[];
@@ -32,7 +32,7 @@ export function parseUnityYaml(content: string): UnityDoc[] {
   const flush = () => {
     if (!cur) return;
     try {
-      const parsed = parseDocument(cur.bodyLines.join('\n'), { strict: false }).toJS() || {};
+      const parsed = parseDocument(quoteUnsafeUnityFileIds(cur.bodyLines.join('\n')), { strict: false }).toJS() || {};
       docs.push({
         classId: cur.classId,
         fileId: cur.fileId,
@@ -52,7 +52,7 @@ export function parseUnityYaml(content: string): UnityDoc[] {
       flush();
       cur = {
         classId: Number(match[1]!),
-        fileId: Number(match[2]!),
+        fileId: match[2]!,
         stripped: Boolean(match[3]),
         line: i + 1,
         bodyLines: [],
@@ -64,4 +64,10 @@ export function parseUnityYaml(content: string): UnityDoc[] {
   flush();
 
   return docs;
+}
+
+function quoteUnsafeUnityFileIds(content: string): string {
+  return content
+    .replace(/(\bfileID:\s*)(-?\d{16,})(?=\s*[,}\r\n])/g, '$1"$2"')
+    .replace(/(\bguid:\s*)([0-9a-fA-F]{32})(?=\s*[,}\r\n])/g, '$1"$2"');
 }

@@ -8,6 +8,8 @@ export const KIND_TO_LABEL = {
   type_alias: 'TypeAlias', import: 'Import', export: 'CodeElement',
   route: 'Route', component: 'Class',
   unity_scene: 'UnityScene', unity_prefab: 'UnityPrefab', unity_asset: 'UnityAsset',
+  unity_image: 'UnityImage', unity_json: 'UnityJson', unity_text: 'UnityText',
+  unity_sprite: 'UnitySprite',
   unity_gameobject: 'UnityGameObject', unity_component: 'UnityComponent',
   unity_script: 'File',
 };

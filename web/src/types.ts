@@ -7,7 +7,8 @@ export type NodeLabel =
   | 'Union' | 'Namespace' | 'Trait' | 'Impl' | 'TypeAlias'
   | 'Const' | 'Static' | 'Property' | 'Record' | 'Delegate'
   | 'Annotation' | 'Constructor' | 'Template' | 'Section' | 'Route' | 'Tool'
-  | 'UnityScene' | 'UnityPrefab' | 'UnityAsset' | 'UnityGameObject' | 'UnityComponent';
+  | 'UnityScene' | 'UnityPrefab' | 'UnityAsset' | 'UnityImage' | 'UnityJson'
+  | 'UnityText' | 'UnitySprite' | 'UnityGameObject' | 'UnityComponent';
 
 export interface NodeProperties {
   name: string;

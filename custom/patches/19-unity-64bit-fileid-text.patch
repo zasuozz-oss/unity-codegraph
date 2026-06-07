@@ -1,0 +1,172 @@
+diff --git a/src/db/migrations.ts b/src/db/migrations.ts
+index d05f874..0d5cb41 100644
+--- a/src/db/migrations.ts
++++ b/src/db/migrations.ts
+@@ -9,7 +9,7 @@ import { SqliteDatabase } from './sqlite-adapter';
+ /**
+  * Current schema version
+  */
+-export const CURRENT_SCHEMA_VERSION = 6;
++export const CURRENT_SCHEMA_VERSION = 7;
+ 
+ /**
+  * Migration definition
+@@ -124,6 +124,47 @@ const migrations: Migration[] = [
+       db.exec('CREATE INDEX IF NOT EXISTS idx_unity_guids_path ON unity_guids(asset_path);');
+     },
+   },
++  {
++    version: 7,
++    description: 'Store Unity fileIDs as text to preserve 64-bit values',
++    up: (db) => {
++      const columns = db.prepare("PRAGMA table_info('unity_guids')").all() as Array<{ name: string; type: string }>;
++      const fileIdColumn = columns.find((col) => col.name === 'file_id');
++      if (fileIdColumn?.type.toUpperCase().includes('TEXT')) {
++        db.exec('CREATE INDEX IF NOT EXISTS idx_unity_guids_path ON unity_guids(asset_path);');
++        return;
++      }
++
++      db.exec(`
++        CREATE TABLE IF NOT EXISTS unity_guids_text (
++          guid TEXT NOT NULL,
++          file_id TEXT NOT NULL,
++          asset_path TEXT NOT NULL,
++          asset_type TEXT NOT NULL,
++          name TEXT,
++          updated_at INTEGER NOT NULL,
++          PRIMARY KEY (guid, file_id)
++        );
++      `);
++
++      if (columns.some((col) => col.name === 'guid')) {
++        db.exec(`
++          INSERT OR REPLACE INTO unity_guids_text (guid, file_id, asset_path, asset_type, name, updated_at)
++          SELECT guid, CAST(file_id AS TEXT), asset_path, asset_type, name, updated_at
++          FROM unity_guids;
++          DROP TABLE unity_guids;
++          ALTER TABLE unity_guids_text RENAME TO unity_guids;
++        `);
++      } else {
++        db.exec(`
++          DROP TABLE IF EXISTS unity_guids;
++          ALTER TABLE unity_guids_text RENAME TO unity_guids;
++        `);
++      }
++
++      db.exec('CREATE INDEX IF NOT EXISTS idx_unity_guids_path ON unity_guids(asset_path);');
++    },
++  },
+ ];
+ 
+ /**
+diff --git a/src/db/queries.ts b/src/db/queries.ts
+index 4ae5f32..e735b88 100644
+--- a/src/db/queries.ts
++++ b/src/db/queries.ts
+@@ -112,7 +112,7 @@ interface UnresolvedRefRow {
+ 
+ export interface UnityGuidDbRow {
+   guid: string;
+-  fileId: number;
++  fileId: string;
+   assetPath: string;
+   assetType: UnityAssetType;
+   name: string | null;
+diff --git a/src/extraction/index.ts b/src/extraction/index.ts
+index f1873d1..bbbe5dc 100644
+--- a/src/extraction/index.ts
++++ b/src/extraction/index.ts
+@@ -523,7 +523,7 @@ function makeUnitySubAssetNode(
+   filePath: string,
+   kind: Node['kind'],
+   name: string,
+-  fileId: number
++  fileId: string
+ ): Node {
+   return {
+     id: generateNodeId(filePath, kind, name, 1),
+@@ -635,6 +635,6 @@ export class ExtractionOrchestrator {
+     const guidRows = this.queries.getUnityGuidRows();
+     const spriteNodes = guidRows
+-      .filter((row) => row.assetType === 'sprite' && row.name && row.fileId !== 0)
++      .filter((row) => row.assetType === 'sprite' && row.name && row.fileId !== '0')
+       .map((row) => makeUnitySubAssetNode(row.assetPath, 'unity_sprite', row.name!, row.fileId));
+     if (spriteNodes.length > 0) this.queries.insertNodes(spriteNodes);
+     const spriteContainmentEdges: Edge[] = [];
+@@ -663,7 +663,7 @@ export class ExtractionOrchestrator {
+         continue;
+       }
+ 
+-      if (row.assetType === 'sprite' && row.name && row.fileId !== 0) {
++      if (row.assetType === 'sprite' && row.name && row.fileId !== '0') {
+         const spriteNode = makeUnitySubAssetNode(row.assetPath, 'unity_sprite', row.name, row.fileId);
+         const imageNode = this.queries
+           .getNodesByFile(row.assetPath)
+@@ -719,15 +719,15 @@ export class ExtractionOrchestrator {
+       return spriteContainmentEdges.length;
+     }
+ 
+-    const localAnchorsByFile = new Map<string, Map<number, string>>();
++    const localAnchorsByFile = new Map<string, Map<string, string>>();
+     for (const node of this.queries.getUnityAnchorNodes()) {
++      if (node.kind !== 'unity_gameobject' && node.kind !== 'unity_component') continue;
+       const marker = node.qualifiedName.lastIndexOf('::');
+       if (marker < 0) continue;
+-      const fileId = Number(node.qualifiedName.slice(marker + 2));
+-      if (!Number.isFinite(fileId)) continue;
++      const fileId = node.qualifiedName.slice(marker + 2);
+       let anchors = localAnchorsByFile.get(node.filePath);
+       if (!anchors) {
+-        anchors = new Map<number, string>();
++        anchors = new Map<string, string>();
+         localAnchorsByFile.set(node.filePath, anchors);
+       }
+       anchors.set(fileId, node.id);
+diff --git a/src/resolution/unity/unity-reference-resolver.ts b/src/resolution/unity/unity-reference-resolver.ts
+index 7b767ce..21a9b47 100644
+--- a/src/resolution/unity/unity-reference-resolver.ts
++++ b/src/resolution/unity/unity-reference-resolver.ts
+@@ -11,7 +11,7 @@ export function resolveUnityEdges(
+   raw: RawUnityEdge[],
+   guidToNodeId: Map<string, string>,
+   guidFileIdToNodeId: Map<string, string>,
+-  localAnchorsByFile: Map<string, Map<number, string>>,
++  localAnchorsByFile: Map<string, Map<string, string>>,
+   methodTargetsByGuid: Map<string, Map<string, string>> = new Map()
+ ): { resolved: Edge[]; missing: Edge[]; placeholderNodes: Node[] } {
+   const resolved: Edge[] = [];
+@@ -34,8 +34,8 @@ export function resolveUnityEdges(
+         continue;
+       }
+ 
+-      const fileId = Number(metadata.fileID);
+-      const target = Number.isFinite(fileId)
++      const fileId = unityFileIdKey(metadata.fileID);
++      const target = fileId
+         ? guidFileIdToNodeId.get(`${metadata.guid}:${fileId}`) ?? guidToNodeId.get(metadata.guid)
+         : guidToNodeId.get(metadata.guid);
+       if (target && edge.source) {
+@@ -59,7 +59,8 @@ export function resolveUnityEdges(
+ 
+     if (relation === 'gameobject_has_component' && edge.filePath) {
+       const anchors = localAnchorsByFile.get(edge.filePath);
+-      const ownerId = anchors?.get(metadata.ownerFileId);
++      const ownerFileId = unityFileIdKey(metadata.ownerFileId);
++      const ownerId = ownerFileId ? anchors?.get(ownerFileId) : undefined;
+       if (ownerId && edge.target) {
+         resolved.push({ ...edge, source: ownerId, target: edge.target });
+       }
+@@ -73,6 +74,13 @@ export function resolveUnityEdges(
+   return { resolved, missing, placeholderNodes };
+ }
+ 
++function unityFileIdKey(value: unknown): string | null {
++  if (typeof value === 'string' && /^-?\d+$/.test(value.trim())) return value.trim();
++  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
++  if (typeof value === 'bigint') return value.toString();
++  return null;
++}
++
+ function missingScriptNode(guid: string, filePath: string): Node {
+   return {
+     id: generateNodeId(filePath, 'unity_script', guid, 1),

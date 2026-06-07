@@ -1,0 +1,103 @@
+diff --git a/src/bin/codegraph.ts b/src/bin/codegraph.ts
+--- a/src/bin/codegraph.ts
++++ b/src/bin/codegraph.ts
+@@ -32,6 +32,13 @@ import { getGlyphs } from '../ui/glyphs';
+ 
+ import { buildNode25BlockBanner, buildNodeTooOldBanner, MIN_NODE_MAJOR } from './node-version-check';
+ import { relaunchWithWasmRuntimeFlagsIfNeeded } from '../extraction/wasm-runtime-flags';
++import {
++  enableUnityMode,
++  writeUnityMarker,
++  enableUnityAssetMode,
++  writeUnityAssetMarker,
++} from '../extraction/unity-mode';
++import { upsertProject } from '../registry/project-registry';
+ 
+ // Lazy-load heavy modules (CodeGraph, runInstaller) to keep CLI startup fast.
+ async function loadCodeGraph(): Promise<typeof import('../index')> {
+@@ -1563,6 +1570,53 @@ program
+     }
+   });
+ 
++/**
++ * codegraph unity <command> [args...]
++ *
++ * Thin Unity-mode wrapper. It re-dispatches into the normal command tree after
++ * enabling Unity mode for this process. Passing --assets enables full-asset
++ * extraction and strips that flag before the upstream command parser sees it.
++ */
++program
++  .command('unity [command...]')
++  .description('Run any codegraph command with Unity extraction enabled (add --assets for prefab/scene/asset graph)')
++  .allowUnknownOption(true)
++  .allowExcessArguments(true)
++  .helpOption(false)
++  .action(async (commandArgs: string[]) => {
++    const unityIdx = process.argv.indexOf('unity');
++    const forwarded = unityIdx >= 0 ? process.argv.slice(unityIdx + 1) : (commandArgs || []);
++    const wantAssets = forwarded.includes('--assets');
++    const strippedForwarded = forwarded.filter((a) => a !== '--assets');
++
++    if (wantAssets) {
++      enableUnityAssetMode();
++    } else {
++      enableUnityMode();
++    }
++
++    if (strippedForwarded.length === 0) {
++      program.outputHelp();
++      return;
++    }
++
++    const sub = strippedForwarded[0];
++    if (sub === 'init' || sub === 'index' || sub === 'sync') {
++      const pathArg = strippedForwarded.slice(1).find((a) => !a.startsWith('-'));
++      const projectPath = path.resolve(pathArg || process.cwd());
++      process.once('exit', () => {
++        if (!isInitialized(projectPath)) return;
++        if (wantAssets) writeUnityAssetMarker(projectPath);
++        else writeUnityMarker(projectPath);
++        try {
++          upsertProject(projectPath);
++        } catch { /* non-fatal */ }
++      });
++    }
++
++    await program.parseAsync(['node', 'codegraph', ...strippedForwarded]);
++  });
++
+ /**
+  * codegraph install
+  */
+diff --git a/src/index.ts b/src/index.ts
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -44,6 +44,7 @@ import { GraphTraverser, GraphQueryManager } from './graph';
+ import { ContextBuilder, createContextBuilder } from './context';
+ import { Mutex, FileLock } from './utils';
+ import { FileWatcher, WatchOptions, PendingFile, LockUnavailableError } from './sync';
++import { enableUnityAssetModeIfMarked, enableUnityModeIfMarked } from './extraction/unity-mode';
+ 
+ // Re-export types for consumers
+ export * from './types';
+@@ -235,8 +236,10 @@ export class CodeGraph {
+    * @returns A CodeGraph instance
+    */
+   static async open(projectRoot: string, options: OpenOptions = {}): Promise<CodeGraph> {
+-    await initGrammars();
+     const resolvedRoot = path.resolve(projectRoot);
++    enableUnityModeIfMarked(resolvedRoot);
++    enableUnityAssetModeIfMarked(resolvedRoot);
++    await initGrammars();
+ 
+     // Check if initialized
+     if (!isInitialized(resolvedRoot)) {
+@@ -263,6 +266,8 @@ export class CodeGraph {
+    */
+   static openSync(projectRoot: string): CodeGraph {
+     const resolvedRoot = path.resolve(projectRoot);
++    enableUnityModeIfMarked(resolvedRoot);
++    enableUnityAssetModeIfMarked(resolvedRoot);
+ 
+     // Check if initialized
+     if (!isInitialized(resolvedRoot)) {

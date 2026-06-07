@@ -5,8 +5,8 @@ plus a multi-project graph dashboard.
 
 This repo does **not** fork-and-edit codegraph in place. Instead it keeps upstream
 pristine and layers Unity support on top as a separate `custom/` overlay, applied
-at setup time. That way `git pull` of upstream never conflicts with our changes —
-the same pattern used by `antigravity-gitnexus`.
+at setup/update time. The generated `codegraph/` tree is left without nested Git
+metadata, so this wrapper remains the only Git repo in the folder.
 
 ## What the overlay adds
 
@@ -50,9 +50,9 @@ unity-codegraph/            <- this wrapper repo (tracked)
 │   ├── server/             node:sqlite HTTP API over the registry + each project db
 │   └── src/                React UI: project picker → graph canvas
 ├── dashboard.sh            launch the dashboard (API + Vite + open browser)
-├── setup.sh                clone upstream -> apply overlay -> build -> wire MCP -> skills -> registry
-├── update.sh               pull upstream -> re-apply overlay -> rebuild
-└── codegraph/              <- upstream clone (gitignored, created by setup.sh)
+├── setup.sh                fetch upstream -> apply overlay -> strip .git -> build -> wire MCP -> skills -> registry
+├── update.sh               refresh upstream -> re-apply overlay -> strip .git -> rebuild
+└── codegraph/              <- generated upstream source tree (gitignored, created by setup.sh)
 ```
 
 ## Quick start
@@ -94,18 +94,22 @@ auto-prunes registry entries whose `.codegraph` was deleted on disk. See
 ## Updating
 
 ```bash
-./update.sh                     # pull upstream, re-apply overlay, rebuild
+./update.sh                     # refresh upstream, re-apply overlay, rebuild
 ./update.sh --apply-custom-only # re-apply overlay only (after editing custom/)
 ```
 
-`update.sh` resets the clone's tracked files to pristine upstream before
-re-applying the patches, so the overlay always lands on a clean base. Patches use
-3-way apply; if upstream drifts enough that a patch can't merge, setup prints the
-exact `git apply --3way` command to resolve it by hand.
+`update.sh` fetches a fresh shallow upstream source tree into a temporary
+directory, replaces `codegraph/`, re-applies the overlay, then removes
+`codegraph/.git`. During a full refresh, patches can still use 3-way apply before
+the metadata is stripped. `--apply-custom-only` just reapplies the overlay to the
+existing generated source tree.
 
 ## Editing the overlay
 
 - **New file** -> drop it under `custom/new/` at its upstream-relative path.
 - **Change an upstream file** -> edit it inside `codegraph/`, then regenerate the
-  patch: `cd codegraph && git diff HEAD -- <file> > ../custom/patches/NN-name.patch`.
+  patch from a temporary upstream clone outside this wrapper repo:
+  `tmp="$(mktemp -d)" && git clone --depth 1 https://github.com/colbymchenry/codegraph.git "$tmp/codegraph"`.
+  Copy the edited file(s) from `codegraph/` into `$tmp/codegraph/`, then run:
+  `git -C "$tmp/codegraph" diff -- <file> > custom/patches/NN-name.patch`.
 - Re-run `./update.sh --apply-custom-only` to verify it applies clean.

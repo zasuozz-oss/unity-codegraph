@@ -25,14 +25,41 @@ import * as path from 'path';
  * matching gitnexus, which wants only the C# graph. (Previously CodeGraph parsed
  * these for prefab→script GUID links; that is intentionally dropped here.)
  */
+export const UNITY_YAML_NODE_EXTENSIONS: ReadonlySet<string> = new Set([
+  '.prefab', '.unity', '.asset',
+  '.mat', '.anim', '.controller', '.overridecontroller',
+  '.rendertexture', '.mixer', '.preset', '.signal', '.terrainlayer',
+  '.spriteatlas', '.spriteatlasv2',
+]);
+
+export const UNITY_IMPORTED_NODE_EXTENSIONS: ReadonlySet<string> = new Set([
+  '.png', '.jpg', '.jpeg', '.tga', '.psd', '.webp', '.bmp', '.tif', '.tiff',
+  '.fbx', '.obj', '.blend', '.dae', '.3ds', '.dxf',
+  '.wav', '.mp3', '.ogg', '.aiff', '.aif', '.flac',
+  '.ttf', '.otf',
+  '.mp4', '.mov', '.webm',
+  '.bin',
+]);
+
+const UNITY_TEXT_NODE_EXTENSIONS: ReadonlySet<string> = new Set([
+  '.json', '.inputactions',
+  '.txt', '.text', '.bytes', '.csv',
+]);
+
 export const UNITY_ASSET_EXTENSIONS: ReadonlySet<string> = new Set([
-  '.prefab', '.unity', '.asset', '.meta', '.asmdef',
+  ...UNITY_YAML_NODE_EXTENSIONS,
+  ...UNITY_IMPORTED_NODE_EXTENSIONS,
+  ...UNITY_TEXT_NODE_EXTENSIONS,
+  '.meta', '.asmdef', '.asmref',
 ]);
 
 /** Asset extensions that produce graph nodes in full-asset mode.
  * `.meta` is a GUID sidecar and `.asmdef` has its own extractor. */
 export const UNITY_ASSET_NODE_EXTENSIONS: ReadonlySet<string> = new Set([
-  '.prefab', '.unity', '.asset',
+  ...UNITY_YAML_NODE_EXTENSIONS,
+  ...UNITY_IMPORTED_NODE_EXTENSIONS,
+  ...UNITY_TEXT_NODE_EXTENSIONS,
+  '.asmref',
 ]);
 
 // ============================================================================
@@ -45,10 +72,14 @@ export const UNITY_ENGINE_IGNORE_DIRS: readonly string[] = [
   'UserSettings', 'ProjectSettings', 'Packages', 'Build', 'Builds',
   // C#/IDE build output that Unity regenerates
   'obj',
+  // Stray Windows drive folder occasionally created by tool/path bugs
+  'C',
   // Editor-only scripts (any depth under Assets/) — gitnexus parity
   'Editor', 'Editor Default Resources',
   // Agent tooling — not game code
   '.claude',
+  // Project-local generated/noise trees intentionally excluded in prior passes
+  'GeneratedLocalRepo', 'MoreGame',
 ];
 
 /**
@@ -61,6 +92,7 @@ export const UNITY_SDK_DIRS: Readonly<Record<string, string>> = {
   AppsFlyer: 'AppsFlyer SDK',
   AVProVideo: 'AVPro Video SDK',
   'CMP Admob': 'CMP Admob',
+  Editor: 'Unity Editor Scripts',
   Extension: 'Extension Scripts',
   ExternalDependencyManager: 'Google EDM',
   FacebookSDK: 'Facebook SDK',
@@ -115,7 +147,7 @@ export const UNITY_ALL_IGNORE_DIRS: readonly string[] = [
 
 /** Directories ignored in full-asset mode: engine/generated + SDKs, but not asset dirs. */
 export const UNITY_ASSET_MODE_IGNORE_DIRS: readonly string[] = [
-  ...UNITY_ENGINE_IGNORE_DIRS.filter((d) => d !== 'ProjectSettings'),
+  ...UNITY_ENGINE_IGNORE_DIRS,
   ...Object.keys(UNITY_SDK_DIRS),
 ];
 

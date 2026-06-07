@@ -1,0 +1,44 @@
+diff --git a/src/extraction/grammars.ts b/src/extraction/grammars.ts
+--- a/src/extraction/grammars.ts
++++ b/src/extraction/grammars.ts
+@@ -9,6 +9,6 @@ import * as path from 'path';
+ import { Parser, Language as WasmLanguage } from 'web-tree-sitter';
+ import { Language } from '../types';
+-import { isUnityAssetMode } from './unity-mode';
++import { isUnityAssetMode, isUnityMode } from './unity-mode';
+ import { UNITY_ASSET_EXTENSIONS, UNITY_ASSET_NODE_EXTENSIONS } from './unity-preset';
+ 
+ export type GrammarLanguage = Exclude<Language, 'svelte' | 'vue' | 'liquid' | 'razor' | 'yaml' | 'twig' | 'xml' | 'properties' | 'unity_asset' | 'unity_asmdef' | 'unknown'>;
+@@ -128,6 +128,5 @@ export function isSourceFile(filePath: string): boolean {
+   const ext = filePath.slice(dot).toLowerCase();
+   if (UNITY_ASSET_EXTENSIONS.has(ext)) {
+-    if (ext === '.meta') return false;
+     if (!isUnityAssetMode()) return false;
+     return UNITY_ASSET_NODE_EXTENSIONS.has(ext) || ext === '.asmdef';
+   }
+@@ -259,8 +258,8 @@ export function detectLanguage(filePath: string, source?: string): Language {
+   if (isPlayRoutesFile(filePath)) return 'yaml';
+   const ext = filePath.substring(filePath.lastIndexOf('.')).toLowerCase();
+   if (UNITY_ASSET_EXTENSIONS.has(ext)) {
+-    if (ext === '.meta' || !isUnityAssetMode()) return 'unknown';
++    if (!isUnityMode()) return 'unknown';
+     if (ext === '.asmdef') return 'unity_asmdef';
+-    if (UNITY_ASSET_NODE_EXTENSIONS.has(ext)) return 'unity_asset';
++    if (isUnityAssetMode() && UNITY_ASSET_NODE_EXTENSIONS.has(ext)) return 'unity_asset';
+     return 'unknown';
+   }
+   // Shopify OS 2.0 JSON templates / section groups → the Liquid extractor (it
+diff --git a/src/types.ts b/src/types.ts
+--- a/src/types.ts
++++ b/src/types.ts
+@@ -36,6 +36,10 @@ export const NODE_KINDS = [
+   'unity_scene',
+   'unity_prefab',
+   'unity_asset',
++  'unity_image',
++  'unity_json',
++  'unity_text',
++  'unity_sprite',
+   'unity_gameobject',
+   'unity_component',
+   'unity_script',

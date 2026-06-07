@@ -41,6 +41,10 @@ export const NODE_COLORS: Record<NodeLabel, string> = {
   UnityScene: '#22d3ee',
   UnityPrefab: '#0ea5e9',
   UnityAsset: '#38bdf8',
+  UnityImage: '#34d399',
+  UnityJson: '#facc15',
+  UnityText: '#cbd5e1',
+  UnitySprite: '#fb7185',
   UnityGameObject: '#7dd3fc',
   UnityComponent: '#a5f3fc',
 };
@@ -86,6 +90,10 @@ export const NODE_SIZES: Record<NodeLabel, number> = {
   UnityScene: 12,
   UnityPrefab: 9,
   UnityAsset: 7,
+  UnityImage: 5,
+  UnityJson: 5,
+  UnityText: 4,
+  UnitySprite: 6,
   UnityGameObject: 4,
   UnityComponent: 3,
 };
@@ -105,6 +113,8 @@ export const DEFAULT_VISIBLE_LABELS: NodeLabel[] = [
   'Class', 'Struct', 'Function', 'Method', 'Interface', 'Trait',
   'Enum', 'Type', 'Property', 'Route',
   'UnityScene', 'UnityPrefab', 'UnityAsset',
+  'UnityImage', 'UnityJson', 'UnityText', 'UnitySprite',
+  'UnityGameObject', 'UnityComponent',
 ];
 
 // Edge/Relation types surfaced by the codegraph mapping

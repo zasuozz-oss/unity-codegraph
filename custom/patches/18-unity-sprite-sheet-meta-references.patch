@@ -1,0 +1,330 @@
+diff --git a/src/db/migrations.ts b/src/db/migrations.ts
+index 5a64623..d05f874 100644
+--- a/src/db/migrations.ts
++++ b/src/db/migrations.ts
+@@ -9,7 +9,7 @@ import { SqliteDatabase } from './sqlite-adapter';
+ /**
+  * Current schema version
+  */
+-export const CURRENT_SCHEMA_VERSION = 5;
++export const CURRENT_SCHEMA_VERSION = 6;
+ 
+ /**
+  * Migration definition
+@@ -71,16 +71,59 @@ const migrations: Migration[] = [
+     up: (db) => {
+       db.exec(`
+         CREATE TABLE IF NOT EXISTS unity_guids (
+-          guid         TEXT PRIMARY KEY,
+-          asset_path   TEXT NOT NULL,
+-          asset_type   TEXT NOT NULL,
+-          main_file_id INTEGER,
+-          updated_at   INTEGER NOT NULL
++          guid TEXT NOT NULL,
++          file_id TEXT NOT NULL,
++          asset_path TEXT NOT NULL,
++          asset_type TEXT NOT NULL,
++          name TEXT,
++          updated_at INTEGER NOT NULL,
++          PRIMARY KEY (guid, file_id)
+         );
+         CREATE INDEX IF NOT EXISTS idx_unity_guids_path ON unity_guids(asset_path);
+       `);
+     },
+   },
++  {
++    version: 6,
++    description: 'Support Unity sub-assets by GUID plus local fileID',
++    up: (db) => {
++      const columns = db.prepare("PRAGMA table_info('unity_guids')").all() as Array<{ name: string }>;
++      const names = new Set(columns.map((col) => col.name));
++      if (names.has('file_id') && names.has('name')) {
++        db.exec('CREATE INDEX IF NOT EXISTS idx_unity_guids_path ON unity_guids(asset_path);');
++        return;
++      }
++
++      db.exec(`
++        CREATE TABLE IF NOT EXISTS unity_guids_new (
++          guid TEXT NOT NULL,
++          file_id TEXT NOT NULL,
++          asset_path TEXT NOT NULL,
++          asset_type TEXT NOT NULL,
++          name TEXT,
++          updated_at INTEGER NOT NULL,
++          PRIMARY KEY (guid, file_id)
++        );
++      `);
++
++      if (names.has('guid')) {
++        db.exec(`
++          INSERT OR REPLACE INTO unity_guids_new (guid, file_id, asset_path, asset_type, name, updated_at)
++          SELECT guid, CAST(COALESCE(main_file_id, 0) AS TEXT), asset_path, asset_type, NULL, updated_at
++          FROM unity_guids;
++          DROP TABLE unity_guids;
++          ALTER TABLE unity_guids_new RENAME TO unity_guids;
++        `);
++      } else {
++        db.exec(`
++          DROP TABLE IF EXISTS unity_guids;
++          ALTER TABLE unity_guids_new RENAME TO unity_guids;
++        `);
++      }
++
++      db.exec('CREATE INDEX IF NOT EXISTS idx_unity_guids_path ON unity_guids(asset_path);');
++    },
++  },
+ ];
+ 
+ /**
+
+diff --git a/src/db/schema.sql b/src/db/schema.sql
+index 4f82ddb..eb61ed9 100644
+--- a/src/db/schema.sql
++++ b/src/db/schema.sql
+@@ -150,12 +150,14 @@ CREATE TABLE IF NOT EXISTS project_metadata (
+     updated_at INTEGER NOT NULL
+ );
+ 
+--- Unity GUID -> asset map (full-asset mode only)
++-- Unity GUID + local fileID -> asset/sub-asset map (full-asset mode only)
+ CREATE TABLE IF NOT EXISTS unity_guids (
+-    guid         TEXT PRIMARY KEY,
+-    asset_path   TEXT NOT NULL,
+-    asset_type   TEXT NOT NULL,
+-    main_file_id INTEGER,
+-    updated_at   INTEGER NOT NULL
++    guid TEXT NOT NULL,
++    file_id TEXT NOT NULL,
++    asset_path TEXT NOT NULL,
++    asset_type TEXT NOT NULL,
++    name TEXT,
++    updated_at INTEGER NOT NULL,
++    PRIMARY KEY (guid, file_id)
+ );
+ CREATE INDEX IF NOT EXISTS idx_unity_guids_path ON unity_guids(asset_path);
+
+diff --git a/src/db/queries.ts b/src/db/queries.ts
+index b3d7571..4ae5f32 100644
+--- a/src/db/queries.ts
++++ b/src/db/queries.ts
+@@ -720,26 +720,31 @@ export class QueryBuilder {
+ 
+   getUnityGuidRows(): UnityGuidDbRow[] {
+     const rows = this.db.prepare(`
+-      SELECT guid, asset_path, asset_type, main_file_id
++      SELECT guid, file_id, asset_path, asset_type, name
+       FROM unity_guids
+     `).all() as Array<{
+       guid: string;
++      file_id: string | number;
+       asset_path: string;
+       asset_type: string;
+-      main_file_id: number | null;
++      name: string | null;
+     }>;
+     return rows.map((row) => ({
+       guid: row.guid,
++      fileId: String(row.file_id),
+       assetPath: row.asset_path,
+       assetType: row.asset_type as UnityAssetType,
+-      mainFileId: row.main_file_id,
++      name: row.name,
+     }));
+   }
+ 
+   getUnityAnchorNodes(): Node[] {
+     const rows = this.db.prepare(`
+       SELECT * FROM nodes
+-      WHERE kind IN ('unity_prefab', 'unity_scene', 'unity_asset', 'unity_gameobject', 'unity_component')
++      WHERE kind IN (
++        'unity_prefab', 'unity_scene', 'unity_asset', 'unity_image', 'unity_sprite',
++        'unity_json', 'unity_text', 'unity_gameobject', 'unity_component'
++      )
+     `).all() as NodeRow[];
+     return rows.map(rowToNode);
+   }
+
+diff --git a/src/extraction/index.ts b/src/extraction/index.ts
+index 7513a15..f1873d1 100644
+--- a/src/extraction/index.ts
++++ b/src/extraction/index.ts
+@@ -14,6 +14,8 @@ import {
+   FileRecord,
+   ExtractionResult,
+   ExtractionError,
++  Node,
++  Edge,
+ } from '../types';
+ import { QueryBuilder } from '../db/queries';
+ import { extractFromSource } from './tree-sitter';
+@@ -22,6 +24,7 @@ import { isUnityAssetMode, isUnityMode } from './unity-mode';
+ import { UNITY_ALL_IGNORE_DIRS, UNITY_ASSET_MODE_IGNORE_DIRS } from './unity-preset';
+ import type { UnityAssetExtractionResult } from './unity/unity-asset-extractor';
+ import { RawUnityEdge, resolveUnityEdges } from '../resolution/unity/unity-reference-resolver';
++import { generateNodeId } from './tree-sitter-helpers';
+ import { logDebug, logWarn } from '../errors';
+ import { validatePathWithinRoot, normalizePath } from '../utils';
+ import ignore, { Ignore } from 'ignore';
+@@ -516,6 +519,27 @@ function scanDirectoryWalk(
+   return files;
+ }
+ 
++function makeUnitySubAssetNode(
++  filePath: string,
++  kind: Node['kind'],
++  name: string,
++  fileId: string
++): Node {
++  return {
++    id: generateNodeId(filePath, kind, name, 1),
++    kind,
++    name,
++    qualifiedName: `${filePath}::${fileId}`,
++    filePath,
++    language: 'unity_asset',
++    startLine: 1,
++    endLine: 1,
++    startColumn: 0,
++    endColumn: 0,
++    updatedAt: Date.now(),
++  };
++}
++
+ /**
+  * Extraction orchestrator
+  */
+@@ -609,18 +633,28 @@ export class ExtractionOrchestrator {
+     if (!isUnityAssetMode()) return 0;
+ 
+     this.queries.buildUnityGuidIndex(this.rootDir);
++    const guidRows = this.queries.getUnityGuidRows();
++    const spriteNodes = guidRows
++      .filter((row) => row.assetType === 'sprite' && row.name && row.fileId !== '0')
++      .map((row) => makeUnitySubAssetNode(row.assetPath, 'unity_sprite', row.name!, row.fileId));
++    if (spriteNodes.length > 0) this.queries.insertNodes(spriteNodes);
++    const spriteContainmentEdges: Edge[] = [];
+ 
+     const guidToNodeId = new Map<string, string>();
++    const guidFileIdToNodeId = new Map<string, string>();
+     const methodTargetsByGuid = new Map<string, Map<string, string>>();
+ 
+-    for (const row of this.queries.getUnityGuidRows()) {
++    for (const row of guidRows) {
+       if (row.assetType === 'script') {
+         const nodes = this.queries.getNodesByFile(row.assetPath);
+         const expectedName = path.basename(row.assetPath, path.extname(row.assetPath));
+         const classNode =
+           nodes.find((node) => node.kind === 'class' && node.name === expectedName) ??
+           nodes.find((node) => node.kind === 'class');
+-        if (classNode) guidToNodeId.set(row.guid, classNode.id);
++        if (classNode) {
++          guidToNodeId.set(row.guid, classNode.id);
++          guidFileIdToNodeId.set(`${row.guid}:${row.fileId}`, classNode.id);
++        }
+         const methods = new Map<string, string>();
+         for (const node of nodes) {
+           if (node.kind === 'method') methods.set(node.name, node.id);
+@@ -629,11 +663,44 @@ export class ExtractionOrchestrator {
+         continue;
+       }
+ 
++      if (row.assetType === 'sprite' && row.name && row.fileId !== '0') {
++        const spriteNode = makeUnitySubAssetNode(row.assetPath, 'unity_sprite', row.name, row.fileId);
++        const imageNode = this.queries
++          .getNodesByFile(row.assetPath)
++          .find((node) => node.kind === 'unity_image');
++        if (imageNode) {
++          const alreadyLinked = this.queries
++            .getOutgoingEdges(imageNode.id, ['contains'], 'unity')
++            .some((edge) => {
++              const metadata = (edge.metadata ?? {}) as Record<string, unknown>;
++              return edge.target === spriteNode.id && metadata.unityRelation === 'image_contains_sprite';
++            });
++          if (!alreadyLinked) {
++            spriteContainmentEdges.push({
++              source: imageNode.id,
++              target: spriteNode.id,
++              kind: 'contains',
++              provenance: 'unity',
++              metadata: {
++                unityRelation: 'image_contains_sprite',
++                guid: row.guid,
++                fileID: row.fileId,
++              },
++            });
++          }
++        }
++        guidFileIdToNodeId.set(
++          `${row.guid}:${row.fileId}`,
++          spriteNode.id
++        );
++        continue;
++      }
+ 
+       const expectedKind =
+         row.assetType === 'prefab' ? 'unity_prefab' :
+         row.assetType === 'scene' ? 'unity_scene' :
+         row.assetType === 'asset' ? 'unity_asset' :
++        row.assetType === 'image' ? 'unity_image' :
+         row.assetType === 'asmdef' ? 'module' :
+         null;
+       if (!expectedKind) continue;
+@@ -641,7 +708,15 @@ export class ExtractionOrchestrator {
+       const assetNode = this.queries
+         .getNodesByFile(row.assetPath)
+         .find((node) => node.kind === expectedKind);
+-      if (assetNode) guidToNodeId.set(row.guid, assetNode.id);
++      if (assetNode) {
++        guidToNodeId.set(row.guid, assetNode.id);
++        guidFileIdToNodeId.set(`${row.guid}:${row.fileId}`, assetNode.id);
++      }
++    }
++
++    if (this.unityRawEdges.length === 0) {
++      if (spriteContainmentEdges.length > 0) this.queries.insertEdges(spriteContainmentEdges);
++      return spriteContainmentEdges.length;
+     }
+ 
+     const localAnchorsByFile = new Map<string, Map<number, string>>();
+@@ -661,13 +736,15 @@ export class ExtractionOrchestrator {
+     const { resolved, placeholderNodes } = resolveUnityEdges(
+       this.unityRawEdges,
+       guidToNodeId,
++      guidFileIdToNodeId,
+       localAnchorsByFile,
+       methodTargetsByGuid
+     );
+     if (placeholderNodes.length > 0) this.queries.insertNodes(placeholderNodes);
++    if (spriteContainmentEdges.length > 0) this.queries.insertEdges(spriteContainmentEdges);
+     if (resolved.length > 0) this.queries.insertEdges(resolved);
+     this.unityRawEdges = [];
+-    return resolved.length;
++    return resolved.length + spriteContainmentEdges.length;
+   }
+ 
+   /**
+
+diff --git a/src/resolution/unity/unity-reference-resolver.ts b/src/resolution/unity/unity-reference-resolver.ts
+index 61d9900..7b767ce 100644
+--- a/src/resolution/unity/unity-reference-resolver.ts
++++ b/src/resolution/unity/unity-reference-resolver.ts
+@@ -10,6 +10,7 @@ export interface RawUnityEdge extends Omit<Edge, 'source' | 'target'> {
+ export function resolveUnityEdges(
+   raw: RawUnityEdge[],
+   guidToNodeId: Map<string, string>,
++  guidFileIdToNodeId: Map<string, string>,
+   localAnchorsByFile: Map<string, Map<number, string>>,
+   methodTargetsByGuid: Map<string, Map<string, string>> = new Map()
+ ): { resolved: Edge[]; missing: Edge[]; placeholderNodes: Node[] } {
+@@ -33,7 +34,10 @@ export function resolveUnityEdges(
+         continue;
+       }
+ 
+-      const target = guidToNodeId.get(metadata.guid);
++      const fileId = Number(metadata.fileID);
++      const target = Number.isFinite(fileId)
++        ? guidFileIdToNodeId.get(`${metadata.guid}:${fileId}`) ?? guidToNodeId.get(metadata.guid)
++        : guidToNodeId.get(metadata.guid);
+       if (target && edge.source) {
+         resolved.push({ ...edge, source: edge.source, target });
+         continue;

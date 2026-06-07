@@ -1,0 +1,217 @@
+diff --git a/src/extraction/index.ts b/src/extraction/index.ts
+--- a/src/extraction/index.ts
++++ b/src/extraction/index.ts
+@@ -20,4 +20,8 @@ import { extractFromSource } from './tree-sitter';
+ import { detectLanguage, isSourceFile, isLanguageSupported, isFileLevelOnlyLanguage, initGrammars, loadGrammarsForLanguages } from './grammars';
+ import { isUnityAssetMode, isUnityMode } from './unity-mode';
+-import { UNITY_ALL_IGNORE_DIRS, UNITY_ASSET_MODE_IGNORE_DIRS } from './unity-preset';
++import {
++  UNITY_ALL_IGNORE_DIRS,
++  UNITY_ASSET_MODE_IGNORE_DIRS,
++  UNITY_IMPORTED_NODE_EXTENSIONS,
++} from './unity-preset';
+ import type { UnityAssetExtractionResult } from './unity/unity-asset-extractor';
+@@ -545,6 +549,35 @@ function makeUnitySubAssetNode(
+   };
+ }
+ 
++function isUnityImportedAssetPath(filePath: string): boolean {
++  return UNITY_IMPORTED_NODE_EXTENSIONS.has(path.extname(filePath).toLowerCase());
++}
++
++async function readIndexContent(fullPath: string, relativePath: string): Promise<{
++  content: string;
++  stats: fs.Stats;
++}> {
++  const stats = await fsp.stat(fullPath);
++  const hasMetaSidecar = fs.existsSync(`${fullPath}.meta`);
++  if (
++    !isUnityImportedAssetPath(relativePath) &&
++    !(hasMetaSidecar && detectLanguage(relativePath) === 'unknown')
++  ) {
++    return { content: await fsp.readFile(fullPath, 'utf-8'), stats };
++  }
++
++  let metaContent = '';
++  try {
++    metaContent = await fsp.readFile(`${fullPath}.meta`, 'utf-8');
++  } catch {
++    // Imported assets without a sidecar still get a stable file-level node.
++  }
++  return {
++    content: `unity-imported:${stats.size}:${Math.floor(stats.mtimeMs)}:${hashContent(metaContent)}`,
++    stats,
++  };
++}
++
+ function stabilizeUnityExtractionResult(
+   result: UnityAssetExtractionResult,
+   assetGuid: string
+@@ -676,7 +705,18 @@ export class ExtractionOrchestrator {
+     const guidRows = this.queries.getUnityGuidRows();
+     const spriteNodes = guidRows
+-      .filter((row) => row.assetType === 'sprite' && row.name && row.fileId !== '0')
++      .filter(
++        (row) =>
++          (row.assetType === 'sprite' || row.assetType === 'subasset') &&
++          row.name &&
++          row.fileId !== '0'
++      )
+       .map((row) =>
+-        makeUnitySubAssetNode(row.assetPath, 'unity_sprite', row.name!, row.fileId, row.guid)
++        makeUnitySubAssetNode(
++          row.assetPath,
++          row.assetType === 'sprite' ? 'unity_sprite' : 'unity_asset',
++          row.name!,
++          row.fileId,
++          row.guid
++        )
+       );
+     if (spriteNodes.length > 0) this.queries.insertNodes(spriteNodes);
+@@ -711,15 +752,23 @@ export class ExtractionOrchestrator {
+         continue;
+       }
+ 
+-      if (row.assetType === 'sprite' && row.name && row.fileId !== '0') {
++      if (
++        (row.assetType === 'sprite' || row.assetType === 'subasset') &&
++        row.name &&
++        row.fileId !== '0'
++      ) {
+         const spriteNode = makeUnitySubAssetNode(
+           row.assetPath,
+-          'unity_sprite',
++          row.assetType === 'sprite' ? 'unity_sprite' : 'unity_asset',
+           row.name,
+           row.fileId,
+           row.guid
+         );
+         const imageNode = this.queries
+           .getNodesByFile(row.assetPath)
+-          .find((node) => node.kind === 'unity_image');
++          .find((node) =>
++            row.assetType === 'sprite'
++              ? node.kind === 'unity_image'
++              : node.qualifiedName.endsWith('::0')
++          );
+         if (imageNode) {
+@@ -726,5 +775,9 @@ export class ExtractionOrchestrator {
+             .some((edge) => {
+               const metadata = (edge.metadata ?? {}) as Record<string, unknown>;
+-              return edge.target === spriteNode.id && metadata.unityRelation === 'image_contains_sprite';
++              return (
++                edge.target === spriteNode.id &&
++                (metadata.unityRelation === 'image_contains_sprite' ||
++                  metadata.unityRelation === 'asset_contains_subasset')
++              );
+             });
+           if (!alreadyLinked) {
+@@ -737,6 +790,9 @@ export class ExtractionOrchestrator {
+               kind: 'contains',
+               provenance: 'unity',
+               metadata: {
+-                unityRelation: 'image_contains_sprite',
++                unityRelation:
++                  row.assetType === 'sprite'
++                    ? 'image_contains_sprite'
++                    : 'asset_contains_subasset',
+                 guid: row.guid,
+                 fileID: row.fileId,
+@@ -758,5 +814,11 @@ export class ExtractionOrchestrator {
+         row.assetType === 'asset' ? 'unity_asset' :
+         row.assetType === 'image' ? 'unity_image' :
+         row.assetType === 'asmdef' ? 'module' :
++        row.assetType === 'asmref' ? 'unity_asset' :
++        row.assetType === 'model' ? 'unity_asset' :
++        row.assetType === 'audio' ? 'unity_asset' :
++        row.assetType === 'font' ? 'unity_asset' :
++        row.assetType === 'video' ? 'unity_asset' :
++        row.assetType === 'other' ? 'unity_asset' :
+         null;
+       if (!expectedKind) continue;
+@@ -867,12 +929,12 @@ export class ExtractionOrchestrator {
+     if (isUnityAssetMode()) {
+       this.queries.buildUnityGuidIndex(this.rootDir);
+     }
++    const unityGuidRows = isUnityAssetMode()
++      ? this.queries.getUnityGuidRows()
++      : [];
+     const unityGuidByAssetPath = new Map(
+-      isUnityAssetMode()
+-        ? this.queries
+-            .getUnityGuidRows()
+-            .filter((row) => row.fileId === '0')
+-            .map((row) => [row.assetPath, row.guid] as const)
+-        : []
++      unityGuidRows
++        .filter((row) => row.fileId === '0')
++        .map((row) => [row.assetPath, row.guid] as const)
+     );
+ 
+@@ -889,6 +951,6 @@ export class ExtractionOrchestrator {
+       total: 0,
+     });
+ 
+-    const files = await scanDirectoryAsync(this.rootDir, (current, file) => {
++    const scannedFiles = await scanDirectoryAsync(this.rootDir, (current, file) => {
+       onProgress?.({
+         phase: 'scanning',
+@@ -899,5 +976,19 @@ export class ExtractionOrchestrator {
+         currentFile: file,
+       });
+     });
++    const files = [
++      ...new Set([
++        ...scannedFiles,
++        ...unityGuidRows
++          .filter(
++            (row) =>
++              row.fileId === '0' &&
++              row.assetType !== 'folder' &&
++              row.assetType !== 'script' &&
++              fs.existsSync(path.join(this.rootDir, row.assetPath))
++          )
++          .map((row) => row.assetPath),
++      ]),
++    ];
+ 
+     // A full index run treats the current filesystem scan as the source of truth.
+@@ -1118,7 +1209,6 @@ export class ExtractionOrchestrator {
+               logWarn('Path traversal blocked in batch reader', { filePath: fp });
+               return { filePath: fp, content: null as string | null, stats: null as fs.Stats | null, error: new Error('Path traversal blocked') };
+             }
+-            const content = await fsp.readFile(fullPath, 'utf-8');
+-            const stats = await fsp.stat(fullPath);
++            const { content, stats } = await readIndexContent(fullPath, fp);
+             return { filePath: fp, content, stats, error: null as Error | null };
+           } catch (err) {
+@@ -1141,3 +1231,7 @@ export class ExtractionOrchestrator {
+-        const language = detectLanguage(filePath, content);
++        const detectedLanguage = detectLanguage(filePath, content);
++        const language =
++          detectedLanguage === 'unknown' && unityGuidByAssetPath.has(filePath)
++            ? 'unity_asset'
++            : detectedLanguage;
+ 
+         // Honour MAX_FILE_SIZE. Without this check, vendored generated
+@@ -1450,7 +1540,6 @@ export class ExtractionOrchestrator {
+     let content: string;
+     let stats: fs.Stats;
+     try {
+-      stats = await fsp.stat(fullPath);
+-      content = await fsp.readFile(fullPath, 'utf-8');
++      ({ content, stats } = await readIndexContent(fullPath, relativePath));
+     } catch (error) {
+       return {
+@@ -1471,3 +1565,10 @@ export class ExtractionOrchestrator {
+-    const language = detectLanguage(relativePath, content);
++    const detectedLanguage = detectLanguage(relativePath, content);
++    const language =
++      detectedLanguage === 'unknown' &&
++      this.queries
++        .getUnityGuidRows()
++        .some((row) => row.assetPath === relativePath && row.fileId === '0')
++        ? 'unity_asset'
++        : detectedLanguage;
+ 
+     // Check file size

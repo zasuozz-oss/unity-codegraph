@@ -2,13 +2,13 @@
 # ══════════════════════════════════════════════════════════════
 # unity-codegraph — one-shot setup
 #
-# Clones (or forks) upstream colbymchenry/codegraph into ./codegraph, applies
-# the Unity overlay from custom/ (new files + patches — upstream is never edited
-# by hand), builds the CLI, wires MCP into your agents, and installs the Unity
-# skills.
+# Fetches upstream colbymchenry/codegraph into ./codegraph, applies the Unity
+# overlay from custom/ (new files + patches — upstream is never edited by hand),
+# removes nested Git metadata, builds the CLI, wires MCP into your agents, and
+# installs the Unity skills.
 #
 #   ./setup.sh            full setup (first install or re-run)
-#   ./setup.sh --update   delegate to ./update.sh (pull upstream + re-apply)
+#   ./setup.sh --update   delegate to ./update.sh (refresh upstream + re-apply)
 #
 # Cross-platform: macOS, Linux, Windows (Git Bash / MSYS2 / WSL).
 # ══════════════════════════════════════════════════════════════
@@ -77,7 +77,7 @@ check_prereqs() {
   ok "node $(node -v), npm $(npm -v)"
 }
 
-# ── Clone / fork upstream into ./codegraph ───────────────────
+# ── Fetch upstream into ./codegraph ──────────────────────────
 fetch_upstream() {
   step "Fetching upstream codegraph"
   # A previous accidental `sudo ./setup.sh` can leave a root-owned clone we can't
@@ -91,25 +91,23 @@ fetch_upstream() {
     err "    sudo rm -rf \"$UPSTREAM_DIR\""
     exit 1
   fi
-  if [ -d "$UPSTREAM_DIR/.git" ]; then
-    ok "Already cloned at $UPSTREAM_DIR (run ./update.sh to pull)"
+  if [ -d "$UPSTREAM_DIR" ]; then
+    [ -f "$UPSTREAM_DIR/package.json" ] || {
+      err "$UPSTREAM_DIR already exists but does not look like a codegraph source tree."
+      err "Remove it and re-run ./setup.sh."
+      exit 1
+    }
+    ok "Upstream source already present at $UPSTREAM_DIR (run ./update.sh to refresh)"
     return
   fi
-  if command -v gh >/dev/null 2>&1; then
-    info "Forking $UPSTREAM_SLUG via gh…"
-    if gh repo fork "$UPSTREAM_SLUG" --clone=false >/dev/null 2>&1; then
-      local me; me="$(gh api user -q .login 2>/dev/null || true)"
-      if [ -n "$me" ] && git clone "https://github.com/$me/codegraph.git" "$UPSTREAM_DIR" 2>/dev/null; then
-        git -C "$UPSTREAM_DIR" remote add upstream "$UPSTREAM_REPO" 2>/dev/null || true
-        ok "Forked → $me/codegraph, cloned → codegraph/ (origin=fork, upstream=$UPSTREAM_SLUG)"
-        return
-      fi
-    fi
-    warn "Fork path failed — falling back to direct clone"
-  fi
-  git clone "$UPSTREAM_REPO" "$UPSTREAM_DIR"
-  git -C "$UPSTREAM_DIR" remote rename origin upstream 2>/dev/null || true
-  ok "Cloned $UPSTREAM_SLUG → codegraph/"
+  git clone --depth 1 "$UPSTREAM_REPO" "$UPSTREAM_DIR"
+  ok "Fetched $UPSTREAM_SLUG → codegraph/"
+}
+
+remove_nested_git_metadata() {
+  [ -d "$UPSTREAM_DIR/.git" ] || return 0
+  rm -rf "$UPSTREAM_DIR/.git"
+  ok "Removed nested Git metadata from codegraph/"
 }
 
 # ── Apply Unity overlay (delegated to update.sh) ─────────────
@@ -257,6 +255,7 @@ main() {
   check_prereqs
   fetch_upstream
   apply_overlay
+  remove_nested_git_metadata
   build_cli
   configure_mcp
   install_skills
@@ -269,7 +268,7 @@ main() {
   echo -e "  ${DIM}Index a Unity project${NC}  cd <UnityProject> && codegraph unity init"
   echo -e "  ${DIM}Index a non-Unity project${NC} cd <Project> && codegraph init"
   echo -e "  ${DIM}Open the dashboard${NC}        ./dashboard.sh"
-  echo -e "  ${DIM}Update upstream + overlay${NC} ./update.sh"
+  echo -e "  ${DIM}Refresh upstream + overlay${NC} ./update.sh"
   echo -e "  ${DIM}Re-apply overlay only${NC}     ./update.sh --apply-custom-only"
   echo ""
   echo -e "  ${YELLOW}→ Restart your agent (Claude Code / Cursor / Codex) to load MCP + skills${NC}"
@@ -280,8 +279,8 @@ case "${1:-}" in
   --update|-u) exec bash "$SCRIPT_DIR/update.sh" ;;
   --help|-h)
     echo "Usage: ./setup.sh [--update]"
-    echo "  (no args)   full setup: clone upstream, apply overlay, build, wire MCP, install skills"
-    echo "  --update    pull upstream + re-apply overlay (delegates to ./update.sh)" ;;
+    echo "  (no args)   full setup: fetch upstream, apply overlay, build, wire MCP, install skills"
+    echo "  --update    refresh upstream + re-apply overlay (delegates to ./update.sh)" ;;
   "") main ;;
   *) err "Unknown option: $1"; exit 1 ;;
 esac

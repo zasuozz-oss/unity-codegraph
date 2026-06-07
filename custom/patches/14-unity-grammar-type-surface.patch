@@ -1,0 +1,37 @@
+diff --git a/src/extraction/grammars.ts b/src/extraction/grammars.ts
+--- a/src/extraction/grammars.ts
++++ b/src/extraction/grammars.ts
+@@ -10,7 +10,7 @@ import * as path from 'path';
+ import { Parser, Language as WasmLanguage } from 'web-tree-sitter';
+ import { Language } from '../types';
+ 
+-export type GrammarLanguage = Exclude<Language, 'svelte' | 'vue' | 'liquid' | 'razor' | 'yaml' | 'twig' | 'xml' | 'properties' | 'unknown'>;
++export type GrammarLanguage = Exclude<Language, 'svelte' | 'vue' | 'liquid' | 'razor' | 'yaml' | 'twig' | 'xml' | 'properties' | 'unity_asset' | 'unity_asmdef' | 'unknown'>;
+ 
+ /**
+  * WASM filename map — maps each language to its .wasm grammar file
+@@ -300,6 +300,7 @@ export function isLanguageSupported(language: Language): boolean {
+   if (language === 'twig') return true; // file-level tracking only
+   if (language === 'xml') return true; // MyBatis mapper extractor
+   if (language === 'properties') return true; // Spring config keys
++  if (language === 'unity_asset' || language === 'unity_asmdef') return true; // Unity custom extractors
+   if (language === 'unknown') return false;
+   return language in WASM_GRAMMAR_FILES;
+ }
+@@ -313,6 +314,7 @@ export function isGrammarLoaded(language: Language): boolean {
+   if (language === 'svelte' || language === 'vue' || language === 'liquid' || language === 'razor') return true;
+   if (language === 'yaml' || language === 'twig') return true; // no WASM grammar needed
+   if (language === 'xml' || language === 'properties') return true; // no WASM grammar needed
++  if (language === 'unity_asset' || language === 'unity_asmdef') return true; // custom extractors
+   return languageCache.has(language);
+ }
+ 
+@@ -405,6 +407,8 @@ export function getLanguageDisplayName(language: Language): string {
+     twig: 'Twig',
+     xml: 'XML',
+     properties: 'Java properties',
++    unity_asset: 'Unity asset',
++    unity_asmdef: 'Unity assembly definition',
+     unknown: 'Unknown',
+   };
+   return names[language] || language;

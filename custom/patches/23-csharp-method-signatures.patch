@@ -1,0 +1,15 @@
+diff --git a/src/extraction/languages/csharp.ts b/src/extraction/languages/csharp.ts
+--- a/src/extraction/languages/csharp.ts
++++ b/src/extraction/languages/csharp.ts
+@@ -40,6 +40,11 @@ export const csharpExtractor: LanguageExtractor = {
+   bodyField: 'body',
+   paramsField: 'parameters',
+   returnField: 'type',
++  getSignature: (node, source) => {
++    const body = node.childForFieldName('body');
++    const endIndex = body?.startIndex ?? node.endIndex;
++    return source.substring(node.startIndex, endIndex).trim();
++  },
+   getVisibility: (node) => {
+     for (let i = 0; i < node.childCount; i++) {
+       const child = node.child(i);

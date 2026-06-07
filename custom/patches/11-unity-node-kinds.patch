@@ -1,0 +1,16 @@
+diff --git a/src/types.ts b/src/types.ts
+--- a/src/types.ts
++++ b/src/types.ts
+@@ -30,6 +30,12 @@ export const NODE_KINDS = [
+   'export',
+   'route',
+   'component',
++  'unity_scene',
++  'unity_prefab',
++  'unity_asset',
++  'unity_gameobject',
++  'unity_component',
++  'unity_script',
+ ] as const;
+ 
+ export type NodeKind = (typeof NODE_KINDS)[number];
