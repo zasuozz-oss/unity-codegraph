@@ -55,7 +55,14 @@ if [ ! -d "$WEB_DIR/node_modules" ]; then
   # A past `sudo` run can leave root-owned files in the default npm cache (~/.npm),
   # which breaks `npm install` with EACCES. Route npm at a user-owned cache instead
   # (no sudo needed) — same workaround as setup.sh. Skipped when the cache is clean.
-  if find "$(npm config get cache 2>/dev/null)" ! -user "$(id -un)" -print -quit 2>/dev/null | grep -q .; then
+  # Windows has no sudo/root, and `find ! -user` over the npm cache is pathologically
+  # slow on MSYS (Windows ACL → POSIX uid per file), so skip the scan there.
+  FOREIGN_CACHE=0
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) ;;
+    *) if find "$(npm config get cache 2>/dev/null)" ! -user "$(id -un)" -print -quit 2>/dev/null | grep -q .; then FOREIGN_CACHE=1; fi ;;
+  esac
+  if [ "$FOREIGN_CACHE" = "1" ]; then
     export npm_config_cache="$SCRIPT_DIR/.npm-cache"
     mkdir -p "$npm_config_cache"
     warn "Default npm cache has root-owned files; using $npm_config_cache"

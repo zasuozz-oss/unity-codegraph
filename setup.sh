@@ -80,7 +80,14 @@ guard_no_root() {
 # True if any entry under $1 is NOT owned by the current user (e.g. left behind
 # by an accidental `sudo ./setup.sh`). Root-owned dirs are world-readable, so
 # `find` can still traverse them as us.
+#
+# Windows has no sudo/root, so there are no foreign-owned files to find. Skip the
+# scan entirely there: on MSYS, `find ... ! -user` resolves a Windows ACL → POSIX
+# uid for EVERY entry, which makes a recursive scan of the npm cache (tens of
+# thousands of files) take tens of seconds to minutes — the setup appears to hang
+# right after "Building & linking codegraph CLI".
 path_has_foreign_files() {
+  [ "$OS" = "windows" ] && return 1
   [ -e "$1" ] || return 1
   [ -n "$(find "$1" ! -user "$(id -un)" -print -quit 2>/dev/null)" ]
 }
