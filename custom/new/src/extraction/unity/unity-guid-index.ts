@@ -192,8 +192,12 @@ export function buildGuidIndex(root: string, db: SqliteDatabase): number {
   let count = 0;
   const rebuild = db.transaction(() => {
     db.exec('DELETE FROM unity_guids');
+    // The persisted schema keys unity_guids by `guid` (one row per asset) with a
+    // single `main_file_id`; the per-sub-asset rows readMetaFile yields collapse
+    // into that main row. readMetaFile emits the main asset row first, so
+    // INSERT OR IGNORE keeps the main row per guid and drops the sub-asset rows.
     const stmt = db.prepare(
-      'INSERT INTO unity_guids (guid, file_id, asset_path, asset_type, name, updated_at) VALUES (?, ?, ?, ?, ?, ?)'
+      'INSERT OR IGNORE INTO unity_guids (guid, asset_path, asset_type, main_file_id, updated_at) VALUES (?, ?, ?, ?, ?)'
     );
     const now = Date.now();
 
@@ -201,10 +205,9 @@ export function buildGuidIndex(root: string, db: SqliteDatabase): number {
       for (const row of readMetaFile(metaPath)) {
         stmt.run(
           row.guid,
-          row.fileId,
           path.relative(root, row.assetPath).replace(/\\/g, '/'),
           row.assetType,
-          row.name,
+          Number(row.fileId),
           now
         );
         count++;

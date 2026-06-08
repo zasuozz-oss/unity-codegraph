@@ -1,0 +1,12 @@
+diff --git a/src/bin/codegraph.ts b/src/bin/codegraph.ts
+--- a/src/bin/codegraph.ts
++++ b/src/bin/codegraph.ts
+@@ -1793,7 +1793,7 @@ program
+     }
+ 
+     // Re-dispatch into the real command tree with Unity mode already on.
+-    await program.parseAsync(['node', 'codegraph', ...forwarded]);
++    await program.parseAsync(['node', 'codegraph', ...strippedForwarded]);
+   });
+ 
+ // Parse and run
